@@ -1,0 +1,2581 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>CareConnect — Unified Healthcare Platform</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Nunito:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+<div id="app"></div>
+<script>
+// ═══════════════════════════════════════════════════════
+// Application state and Supabase-driven data
+// ═══════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════
+const S = {
+  screen: 'login',   // login|otp|role|modules|carepath|careguide|caremeds
+  subScreen: null,
+  role: null,        // patient|family|doctor|nurse
+  phone: '',
+  email: '',
+  userType: null, // 'clinical' or 'patient'
+  userTypeHint: null,
+  otp: ['','','',''],
+  navHistory: [],
+  cpTab: 0, cmTab: 0, cgMessages: [],
+  triageState: 'idle', triageFlow: null, triageStep: 0,
+  selectedRole: null,
+  activeProfile: 'patient',
+  reminderTimes: [],
+  reminderTime: '',
+  reminderTimeouts: [],
+  checkinStep: 0, checkinFeel: 0, checkinPain: 3, checkinSymptoms: [],
+  dischargeStep: 0,
+  rxRecording: false,
+  medDoseState: {},  // Format: "medicineId:timeSlot" -> "pending|confirmed|missed"
+  notifCount: 2,
+  language: 'en'
+};
+
+const LANG_LABELS = {
+  en: 'English', hi: 'हिन्दी'
+};
+
+const LANG = {
+  en: {
+    login_title: 'Welcome back 👋',
+    login_sub: "Enter your mobile number to continue. We'll send a one-time password.",
+    get_otp: 'Get OTP',
+    verify_number: 'Verify Your Number',
+    otp_sent: 'OTP sent to',
+    enter_otp: 'Enter OTP',
+    otp_demo_hint: 'Demo Mode: Use OTP 1234 to continue',
+    demo_mode: 'Demo Mode:',
+    mobile_number_label: 'Mobile Number',
+    phone_placeholder: '98765 43210',
+    secure_data: '🔒 Your data is encrypted and stored securely in India',
+    invalid_mobile_number: 'Please enter a valid mobile number',
+    otp_sent_hint: 'A 4-digit code was sent to your number.',
+    verify_continue: 'Verify & Continue',
+    didnt_receive: "Didn't receive?",
+    otp_resent_message: 'OTP resent! (Demo: use 1234)',
+    resend_action: 'Resend OTP',
+    change_number: 'Change Number',
+    who_are_you: 'Who are you?',
+    role_patient_label: 'Patient / Caretaker',
+    role_patient_desc: 'Record health data, confirm medicines, complete daily check-ins',
+    role_family_label: 'Family Member',
+    role_family_desc: 'Monitor elderly parent, view adherence, book appointments',
+    role_doctor_label: 'Doctor / Nurse',
+    role_doctor_desc: 'Manage prescriptions, view patient alerts, discharge management',
+    hero_tag: 'Post-Discharge • Triage • Medication Intelligence',
+    how_are_you: 'How are you today',
+    how_are_you_help: 'Please answer a few questions for your doctor and family.',
+    overall_feeling: 'Overall feeling',
+    tap_emoji: 'Tap the emoji that describes how you feel',
+    pain_level: 'Pain level',
+    no_pain: '0 = No pain',
+    severe: '10 = Severe',
+    any_symptoms: 'Any symptoms?',
+    tap_all_apply: 'Tap all that apply',
+    anything_else: 'Anything else to tell your doctor?',
+    symptom_placeholder: 'e.g., I slept well last night. Took morning medicines on time.',
+    submit_checkin: 'Submit Check-in',
+    select_feeling_first: 'Please select how you\'re feeling first',
+    post_discharge: 'Post Discharge',
+    adherence: 'Adherence',
+    follow_up: 'Follow-up',
+    age_years: 'Age {0}',
+    step_label: 'Step {0}: {1}',
+    first_name: 'First Name',
+    last_name: 'Last Name',
+    gender_label: 'Gender',
+    female: 'Female',
+    male: 'Male',
+    other: 'Other',
+    emergency_contact: 'Emergency Contact (Family)',
+    primary_diagnosis: 'Primary Diagnosis',
+    secondary_diagnoses: 'Secondary Diagnoses',
+    discharge_instructions: 'Discharge Instructions',
+    discharge_instructions_example: 'Take medicines as prescribed. Avoid salt and sugar. Walk for 20 min daily. Report any chest pain or breathlessness immediately.',
+    follow_up_appointment_date: 'Follow-up Appointment Date',
+    tip_voice_dictation: 'Tip: Use voice dictation to add medicines quickly',
+    remove_medicine: 'Remove medicine:',
+    voice_dictation_start: 'Voice dictation would start here. Say medicine name and dose.',
+    manual_add_medicine: 'Manual add medicine form would open here',
+    daily_checkin_protocol_days: 'Daily Check-in Protocol (Days)',
+    days: 'days',
+    recommended: 'Recommended',
+    patient_receive_whatsapp: 'App notifications will remind you about your daily check-ins.',
+    alert_conditions: 'Alert Conditions',
+    reminder_channels: 'Reminder Channels',
+    reminder_time: 'Reminder time',
+    reminder_help: 'Set a reminder time and the app will notify you at that hour.',
+    reminder_set_at: 'Reminder set for {0}. You will get an app notification then.',
+    reminder_alert: 'Reminder: It\'s time for your health check-in at {0}.',
+    continue_button: 'Continue',
+    discharge_activate_protocol: '✓ Discharge & Activate Care Protocol',
+    discharge_success_title: '✅ Patient discharged successfully!',
+    discharge_success_body: 'Ramabai Kulkarni has been added to CarePath.\n• Daily check-in prompts will start tomorrow at 9 AM\n• Medication schedule has been synced to CareMeds\n• Follow-up appointment reminder set for Apr 28, 2025',
+    post_discharge_dashboard: 'Post-Discharge Dashboard',
+    active_patients: 'Active Patients',
+    urgent_alerts: 'Urgent Alerts',
+    monitor: 'Monitor',
+    all_good: 'All Good',
+    urgent: 'Urgent',
+    missed_checkins_alert: 'Suresh Mehta has missed 1 day of check-ins. Last known: Post Cardiac Surgery, Day 5.',
+    active_patients_title: 'Active Patients',
+    discharge_patient_action: 'Discharge Patient',
+    last_checkin: 'Last check-in',
+    day_label: 'Day',
+    discharge_new_patient: 'Discharge New Patient',
+    symptom_trend_last_7_days: 'Symptom Trend (Last 7 Days)',
+    improving: 'Improving',
+    follow_up_consultation: 'Follow-up Consultation',
+    opd: 'OPD',
+    confirmed: 'Confirmed',
+    reschedule_appointment: 'Reschedule appointment with Dr. Rajesh Sharma — calendar picker would open here',
+    recent_checkins: 'Recent Check-ins',
+    see_all: 'See all',
+    full_checkin_history: 'Full check-in history would open here',
+    nurse_alerted: 'Nurse Alerted',
+    pain_label: 'Pain',
+    symptoms: 'Symptoms',
+    book_appointment_form: 'Book appointment form would open — select doctor, date, time',
+    book_followup_appointment: 'Book Follow-up Appointment',
+    careguide_title: 'CareGuide',
+    ai_active: 'AI Active',
+    medical_disclaimer: 'This is not a medical diagnosis. Always consult a qualified doctor for medical advice.',
+    describe_symptoms_placeholder: 'Describe your symptoms...',
+    start_new_consultation: 'Start New Consultation',
+    connecting_doctor: 'Connecting to nearest available doctor...\n\nDr. Sonal Mehta is available now for a video consultation.',
+    consult_now: 'Consult Now',
+    family_monitor_recovery: 'Monitor your parent\'s recovery, check-in history, and book follow-up appointments.',
+    doctor_view_alerts: 'View patient discharge alerts and manage post-discharge protocols.',
+    nurse_manage_patients: 'Manage discharged patients, view alerts, and discharge new patients.',
+    patient_alerts: 'Patient Alerts',
+    doctor_clinical_triage: 'AI-assisted symptom triage with clinical decision support.',
+    nurse_triage_tool: 'Quick triage tool to assess patients before escalation.',
+    family_ai_guidance: 'Check symptoms for your parent and get guidance on the right care level.',
+    quick_assess: 'Quick Assess',
+    family_adherence_desc: 'Track Ramabai\'s medication adherence, set reminders, and get missed-dose alerts.',
+    doctor_prescription_mgmt: 'Manage prescriptions, check drug interactions, and monitor adherence.',
+    nurse_medication_review: 'View patient medication schedules and adherence reports.',
+    adherence_tracker: 'Adherence Tracker',
+    continue_as: 'Continue as',
+    good_morning: 'Good morning,',
+    choose_module: 'Choose a module',
+    patient_badge: 'Patient ·',
+    family_badge: 'Family Caregiver ·',
+    doctor_badge: 'Doctor ·',
+    nurse_badge: 'Nurse ·',
+    edit_profile: 'Edit profile',
+    edit_label: 'Edit',
+    save_profile: 'Save profile',
+    upload_photo: 'Upload profile picture',
+    name_label: 'Name',
+    age_label: 'Age',
+    city_label: 'City',
+    disease_label: 'Existing Disease',
+    language_label: 'Language',
+    profile_heading: 'Update Profile',
+    no_photo: 'No photo selected',
+    profile_saved: 'Profile saved',
+    patient_profile: 'Patient',
+    daily_checkin: 'Daily Check-in',
+    symptom_check: 'Symptom Check',
+    my_medicines: 'My Medicines',
+    family_dashboard: 'Family Dashboard',
+    clinical_triage: 'Clinical Triage',
+    nurse_dashboard: 'Nurse Dashboard',
+    ai_guidance: 'AI Guidance',
+    prescriptions: 'Prescriptions',
+    med_review: 'Med Review',
+    self_care: 'Self-Care at Home',
+    phc: 'Visit a Clinic or PHC',
+    telemedicine: 'Consult a Doctor Online',
+    er: 'Go to Emergency Room NOW',
+    symptom_check_description: "Tell me your symptoms and I'll guide you to the right care.",
+    daily_health: 'Complete your daily health check-in and view your recovery progress.',
+    medication_coach: "See your today's medicines and confirm when you've taken them.",
+    next_reminder: 'Next Reminder',
+    call_my_doctor: 'Call My Doctor',
+    status_good: 'All good',
+    status_monitor: 'Monitor closely',
+    status_alert: 'Needs attention',
+    approved: 'Confirmed',
+    pending: 'Pending',
+    missed: 'Missed',
+    other: 'Other',
+    hospital_name: 'Hospital Name',
+    hospital_help: 'Edit your hospital name',
+    doctor_name: 'Doctor Name',
+    doctor_phone: 'Doctor Phone'
+  },
+  hi: {
+    login_title: 'फिर से स्वागत है 👋',
+    login_sub: 'जारी रखने के लिए अपना मोबाइल नंबर दर्ज करें। हम एक वन-टाइम पासवर्ड भेजेंगे।',
+    get_otp: 'OTP प्राप्त करें',
+    verify_number: 'अपना नंबर सत्यापित करें',
+    otp_sent: 'OTP भेजा गया',
+    enter_otp: 'OTP दर्ज करें',
+    otp_demo_hint: 'डेमो मोड: जारी रखने के लिए OTP 1234 का उपयोग करें',
+    demo_mode: 'डेमो मोड:',
+    mobile_number_label: 'मोबाइल नंबर',
+    phone_placeholder: '98765 43210',
+    secure_data: '🔒 आपके डेटा को भारत में सुरक्षित रूप से एन्क्रिप्ट किया गया है',
+    invalid_mobile_number: 'कृपया एक वैध मोबाइल नंबर दर्ज करें',
+    otp_sent_hint: '4 अंकों का कोड आपके नंबर पर भेजा गया है।',
+    verify_continue: 'सत्यापित करें और जारी रखें',
+    didnt_receive: 'नहीं मिला?',
+    otp_resent_message: 'OTP फिर से भेजा गया! (डेमो: 1234 का उपयोग करें)',
+    resend_action: 'OTP फिर से भेजें',
+    change_number: 'नंबर बदलें',
+    who_are_you: 'आप कौन हैं?',
+    role_patient_label: 'Patient / Caretaker',
+    role_patient_desc: 'Record health data, confirm medicines, complete daily check-ins',
+    role_family_label: 'Family Member',
+    role_family_desc: 'Monitor elderly parent, view adherence, book appointments',
+    role_doctor_label: 'Doctor / Nurse',
+    role_doctor_desc: 'Manage prescriptions, view patient alerts, discharge management',
+    hero_tag: 'Post-Discharge • Triage • Medication Intelligence',
+    how_are_you: 'How are you today',
+    how_are_you_help: 'Please answer a few questions for your doctor and family.',
+    overall_feeling: 'Overall feeling',
+    tap_emoji: 'Tap the emoji that describes how you feel',
+    pain_level: 'Pain level',
+    no_pain: '0 = No pain',
+    severe: '10 = Severe',
+    any_symptoms: 'Any symptoms?',
+    tap_all_apply: 'Tap all that apply',
+    anything_else: 'Anything else to tell your doctor?',
+    symptom_placeholder: 'e.g., I slept well last night. Took morning medicines on time.',
+    submit_checkin: 'Submit Check-in',
+    select_feeling_first: 'Please select how you\'re feeling first',
+    post_discharge: 'Post Discharge',
+    adherence: 'Adherence',
+    follow_up: 'Follow-up',
+    age_years: 'Age {0}',
+    select_role: 'जारी रखने के लिए अपनी भूमिका चुनें',
+    role_help: 'यह तय करता है कि आपको ऐप में क्या दिखाई देगा',
+    continue_as: 'के रूप में जारी रखें',
+    good_morning: 'सुप्रभात,',
+    choose_module: 'एक मॉड्यूल चुनें',
+    patient_badge: 'रोगी ·',
+    family_badge: 'परिवार देखभालकर्ता ·',
+    doctor_badge: 'डॉक्टर ·',
+    nurse_badge: 'नर्स ·',
+    edit_profile: 'प्रोफ़ाइल संपादित करें',
+    save_profile: 'प्रोफ़ाइल सहेजें',
+    upload_photo: 'प्रोफ़ाइल चित्र अपलोड करें',
+    reminder_time: 'रीमाइंडर समय',
+    reminder_help: 'एक समय निर्धारित करें और ऐप आपको उसी समय सूचना देगा।',
+    reminder_set_at: 'रीमाइंडर {0} पर सेट किया गया है। आपको उस समय ऐप पर सूचना मिलेगी।',
+    reminder_alert: 'रिमाइंडर: आपकी स्वास्थ्य जांच अब {0} पर है।',
+    patient_receive_whatsapp: 'ऐप नोटिफिकेशन आपको दैनिक चेक-इन के बारे में याद दिलाएंगे।',
+    name_label: 'नाम',
+    age_label: 'आयु',
+    city_label: 'शहर',
+    disease_label: 'मौजूदा रोग',
+    language_label: 'भाषा',
+    profile_heading: 'प्रोफ़ाइल अपडेट करें',
+    no_photo: 'कोई फ़ोटो नहीं चुना गया',
+    profile_saved: 'प्रोफ़ाइल सहेज ली गई',
+    patient_profile: 'रोगी',
+    daily_checkin: 'दैनिक चेक-इन',
+    symptom_check: 'लक्षण जांच',
+    my_medicines: 'मेरी दवाइयाँ',
+    family_dashboard: 'परिवार डैशबोर्ड',
+    clinical_triage: 'क्लिनिकल ट्रायाज',
+    nurse_dashboard: 'नर्स डैशबोर्ड',
+    ai_guidance: 'एआई मार्गदर्शन',
+    prescriptions: 'प्रिस्क्रिप्शन',
+    med_review: 'दवा समीक्षा',
+    self_care: 'घर पर आत्म-देखभाल',
+    phc: 'क्लिनिक या पीएचसी पर जाएं',
+    telemedicine: 'ऑनलाइन डॉक्टर से परामर्श करें',
+    er: 'तुरंत आपातकालीन विभाग में जाएं',
+    symptom_check_description: 'मुझे अपने लक्षण बताएं और मैं आपको सही उपचार के लिए मार्गदर्शन करूंगा।',
+    daily_health: 'अपना दैनिक स्वास्थ्य चेक-इन पूरा करें और अपनी रिकवरी प्रगति देखें।',
+    medication_coach: 'अपने आज की दवाइयाँ देखें और पुष्टि करें कि आपने उन्हें ले लिया है।',
+    next_reminder: 'अगला अनुस्मारक',
+    call_my_doctor: 'अपने डॉक्टर को कॉल करें',
+    status_good: 'सब ठीक है',
+    status_monitor: 'नज़दीकी निगरानी',
+    status_alert: 'ध्यान की आवश्यकता',
+    approved: 'पुष्ट',
+    pending: 'लंबित',
+    missed: 'मिस्ड',
+    other: 'अन्य',
+    hero_tag: 'पोस्ट-डिस्चार्ज · ट्रायाज · दवा इंटेलिजेंस',
+    how_are_you: 'आप आज कैसे हैं',
+    how_are_you_help: 'कृपया अपने डॉक्टर और परिवार के लिए कुछ प्रश्नों का उत्तर दें।',
+    overall_feeling: 'समग्र भावना',
+    tap_emoji: 'अपनी भावना का वर्णन करने वाले इमोजी पर टैप करें',
+    pain_level: 'दर्द का स्तर',
+    no_pain: '0 = कोई दर्द नहीं',
+    severe: '10 = गंभीर',
+    any_symptoms: 'कोई लक्षण?',
+    tap_all_apply: 'सभी लागू होने वाले टैप करें',
+    anything_else: 'अपने डॉक्टर को कुछ और कहना?',
+    symptom_placeholder: 'जैसे, मुझे कल रात अच्छी नींद आई। सुबह की दवाइयाँ समय पर ली।',
+    submit_checkin: 'चेक-इन सबमिट करें',
+    select_feeling_first: 'पहले अपनी भावना चुनें',
+    post_discharge: 'पोस्ट डिस्चार्ज',
+    adherence: 'पालन',
+    follow_up: 'अनुवर्ती',
+    age_years: 'आयु {0}',
+    step_label: 'चरण {0}: {1}',
+    first_name: 'पहला नाम',
+    last_name: 'अंतिम नाम',
+    gender_label: 'लिंग',
+    female: 'महिला',
+    male: 'पुरुष',
+    other: 'अन्य',
+    emergency_contact: 'आपातकालीन संपर्क (परिवार)',
+    primary_diagnosis: 'प्राथमिक निदान',
+    secondary_diagnoses: 'माध्यमिक निदान',
+    discharge_instructions: 'डिस्चार्ज निर्देश',
+    discharge_instructions_example: 'दवाइयें निर्धारित अनुसार लें। नमक और चीनी से बचें। प्रतिदिन 20 मिनट चलें। छाती में दर्द या सांसों की कमी की तुरंत रिपोर्ट करें।',
+    follow_up_appointment_date: 'अनुवर्ती नियुक्ति तारीख',
+    tip_voice_dictation: 'सुझाव: दवाइयों को जल्दी जोड़ने के लिए वॉयस डिक्टेशन का उपयोग करें',
+    remove_medicine: 'दवा हटाएं:',
+    voice_dictation_start: 'वॉयस डिक्टेशन यहाँ शुरू होगा। दवा का नाम और खुराक कहें।',
+    manual_add_medicine: 'मैनुअल ऐड दवा फॉर्म यहाँ खुलेगा',
+    daily_checkin_protocol_days: 'दैनिक चेक-इन प्रोटोकॉल (दिन)',
+    days: 'दिन',
+    recommended: 'अनुशंसित',
+    alert_conditions: 'चेतावनी शर्तें',
+    reminder_channels: 'रिमाइंडर चैनल',
+    continue_button: 'जारी रखें',
+    discharge_activate_protocol: '✓ डिस्चार्ज और केयर प्रोटोकॉल सक्रिय करें',
+    discharge_success_title: '✅ रोगी सफलतापूर्वक डिस्चार्ज हुआ!',
+    discharge_success_body: 'रामाबाई कुलकर्णी को कैरपाथ में जोड़ा गया है।\n• दैनिक चेक-इन कल सुबह 9 बजे शुरू होंगे\n• दवा अनुसूची केयरमेड्स में सिंक की गई है\n• 28 अप्रैल 2025 के लिए अनुवर्ती नियुक्ति अनुस्मारक सेट किया गया है',
+    post_discharge_dashboard: 'पोस्ट-डिस्चार्ज डैशबोर्ड',
+    active_patients: 'सक्रिय रोगी',
+    urgent_alerts: 'तत्काल चेतावनी',
+    monitor: 'निगरानी करें',
+    all_good: 'सब ठीक है',
+    urgent: 'तत्काल',
+    missed_checkins_alert: 'सुरेश मेहता ने 1 दिन की चेक-इन मिस की है। अंतिम ज्ञात: पोस्ट कार्डिएक सर्जरी, दिन 5।',
+    active_patients_title: 'सक्रिय रोगी',
+    discharge_patient_action: 'रोगी को डिस्चार्ज करें',
+    last_checkin: 'अंतिम चेक-इन',
+    day_label: 'दिन',
+    discharge_new_patient: 'नया रोगी डिस्चार्ज करें',
+    symptom_trend_last_7_days: 'लक्षण प्रवृत्ति (पिछले 7 दिन)',
+    improving: 'सुधार हो रहा है',
+    follow_up_consultation: 'अनुवर्ती परामर्श',
+    opd: 'ओपीडी',
+    confirmed: 'पुष्ट',
+    reschedule_appointment: 'डॉक्टर राजेश शर्मा के साथ नियुक्ति को फिर से शेड्यूल करें — कैलेंडर पिकर यहाँ खुलेगा',
+    recent_checkins: 'हाल की चेक-इन',
+    see_all: 'सभी देखें',
+    full_checkin_history: 'पूरी चेक-इन इतिहास यहाँ खुलेगा',
+    nurse_alerted: 'नर्स को सतर्क किया गया',
+    pain_label: 'दर्द',
+    symptoms: 'लक्षण',
+    book_appointment_form: 'नियुक्ति बुक करने का फॉर्म खुलेगा - डॉक्टर, तारीख, समय चुनें',
+    book_followup_appointment: 'अनुवर्ती नियुक्ति बुक करें',
+    careguide_title: 'कैरगाइड',
+    ai_active: 'एआई सक्रिय',
+    medical_disclaimer: 'यह चिकित्सा निदान नहीं है। चिकित्सा सलाह के लिए हमेशा एक योग्य डॉक्टर से परामर्श करें।',
+    describe_symptoms_placeholder: 'अपने लक्षणों का वर्णन करें...',
+    start_new_consultation: 'नई परामर्श शुरू करें',
+    connecting_doctor: 'निकटतम उपलब्ध डॉक्टर से जुड़ा जा रहा है...\n\nडॉ. सोनल मेहता वीडियो परामर्श के लिए अभी उपलब्ध हैं।',
+    consult_now: 'अभी परामर्श करें',
+    family_monitor_recovery: 'अपने माता-पिता की रिकवरी, चेक-इन इतिहास, और अनुवर्ती नियुक्तियों की निगरानी करें।',
+    doctor_view_alerts: 'रोगी डिस्चार्ज चेतावनी देखें और पोस्ट-डिस्चार्ज प्रोटोकॉल प्रबंधित करें।',
+    nurse_manage_patients: 'डिस्चार्ज रोगियों का प्रबंधन करें, चेतावनी देखें, और नए रोगियों को डिस्चार्ज करें।',
+    patient_alerts: 'रोगी चेतावनी',
+    doctor_clinical_triage: 'एआई-सहायता प्राप्त लक्षण ट्रायाज नैदानिक निर्णय समर्थन के साथ।',
+    nurse_triage_tool: 'बढ़ना से पहले रोगियों का आकलन करने के लिए त्वरित ट्रायाज उपकरण।',
+    family_ai_guidance: 'अपने माता-पिता के लक्षण जांचें और सही देखभाल स्तर पर मार्गदर्शन प्राप्त करें।',
+    quick_assess: 'द्रुत आकलन',
+    family_adherence_desc: 'रामाबाई की दवा पालन को ट्रैक करें, अनुस्मारक सेट करें, और मिस्ड-डोज़ चेतावनी प्राप्त करें।',
+    doctor_prescription_mgmt: 'प्रिस्क्रिप्शन प्रबंधित करें, दवा इंटरैक्शन जांचें, और पालन की निगरानी करें।',
+    nurse_medication_review: 'रोगी दवा अनुसूची और पालन रिपोर्ट देखें।',
+    adherence_tracker: 'पालन ट्रैकर',
+    hospital_name: 'अस्पताल का नाम',
+    hospital_help: 'अपने अस्पताल का नाम संपादित करें',
+    doctor_name: 'डॉक्टर का नाम',
+    doctor_phone: 'डॉक्टर का फोन'
+  },
+};
+
+// ═══════════════════════════════════════════════════════
+// SUPABASE CONFIGURATION
+// ═══════════════════════════════════════════════════════
+const SUPABASE_URL = 'https://gselacajyzbdjztmzgix.supabase.co'; // Replace with your Supabase project URL
+const SUPABASE_ANON_KEY = 'sb_publishable_fNI8VloEiwFK_Zq3vZQUHw_y4xiweV2'; // Replace with your Supabase anon/public key
+
+// Initialize Supabase client
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+let currentUser = null;
+let currentPatientId = null;
+let currentPatientData = null;
+let currentMedications = [];
+let currentMedicationLogs = [];
+let currentCheckins = [];
+let availableRoles = [];
+let PATIENT_DATA = null;
+let PRACTITIONER_DATA = null;
+let FAMILY_DATA = null;
+let PATIENT_LIST = null;
+
+async function ensureUserContext(){
+  if(S.role==='patient'){
+    await loadCurrentPatientId();
+    await loadPatientData();
+  }
+  if(S.role==='family'){
+    await loadCurrentFamilyId();
+    await loadFamilyData();
+  }
+  if(S.role==='doctor' || S.role==='nurse'){
+    await loadCurrentPractitionerId();
+    await loadPractitionerData();
+  }
+}
+
+async function loadCurrentPatientId(){
+  if(S.currentPatientId) return S.currentPatientId;
+  if(S.phone){
+    const { data } = await sb.from('patients').select('id').eq('phone', S.phone).maybeSingle();
+    if(data?.id){ S.currentPatientId = data.id; return data.id; }
+  }
+  const { data } = await sb.from('patients').select('id').limit(1).maybeSingle();
+  if(data?.id){ S.currentPatientId = data.id; }
+  return S.currentPatientId;
+}
+
+async function loadCurrentPractitionerId(){
+  if(S.currentPractitionerId) return S.currentPractitionerId;
+  if(!S.phone) return null;
+  const table = S.role === 'nurse' ? 'nurses' : 'doctors';
+  const { data } = await sb.from(table).select('id').eq('phone', S.phone).maybeSingle();
+  if(data?.id){ S.currentPractitionerId = data.id; return data.id; }
+  const { data: first } = await sb.from(table).select('id').limit(1).maybeSingle();
+  if(first?.id){ S.currentPractitionerId = first.id; }
+  return S.currentPractitionerId;
+}
+
+async function loadCurrentFamilyId(){
+  if(S.currentFamilyId) return S.currentFamilyId;
+  if(S.phone){
+    const { data } = await sb.from('families').select('id').eq('phone', S.phone).maybeSingle();
+    if(data?.id){ S.currentFamilyId = data.id; return data.id; }
+  }
+  const { data } = await sb.from('families').select('id').limit(1).maybeSingle();
+  if(data?.id){ S.currentFamilyId = data.id; }
+  return S.currentFamilyId;
+}
+
+async function loadPatientData(patientId){
+  const id = patientId || S.currentPatientId || await loadCurrentPatientId();
+  if(!id){ PATIENT_DATA = null; return null; }
+  if(PATIENT_DATA?.id === id) return PATIENT_DATA;
+  try{
+    const { data, error } = await sb.from('patients').select('*').eq('id', id).maybeSingle();
+    if(error || !data) throw error || new Error('No patient');
+    if(data.doctor_id){
+      const { data: doc } = await sb.from('doctors').select('*').eq('id', data.doctor_id).maybeSingle();
+      if(doc) data.doctor = doc;
+    }
+    data.conditions = data.conditions || [];
+    data.medications = data.medications || [];
+    data.adherenceWeek = data.adherenceWeek || [];
+    data.recentCheckins = data.recentCheckins || [];
+    data.avatar = data.avatar || initials(data.name || '??');
+    data.avatarColor = data.avatarColor || avColor(0);
+    PATIENT_DATA = data;
+  } catch(err){
+    console.warn('loadPatientData error', err);
+    PATIENT_DATA = null;
+  }
+  return PATIENT_DATA;
+}
+
+async function loadPractitionerData(){
+  if(PRACTITIONER_DATA) return PRACTITIONER_DATA;
+  await loadCurrentPractitionerId();
+  if(!S.currentPractitionerId) return null;
+  const table = S.role === 'nurse' ? 'nurses' : 'doctors';
+  const { data } = await sb.from(table).select('*').eq('id', S.currentPractitionerId).maybeSingle();
+  PRACTITIONER_DATA = data || null;
+  return PRACTITIONER_DATA;
+}
+
+async function loadPractitionerPatients(){
+  if(PATIENT_LIST) return PATIENT_LIST;
+  await loadPractitionerData();
+  if(!S.currentPractitionerId) return [];
+  const field = S.role === 'nurse' ? 'nurse_id' : 'doctor_id';
+  const { data } = await sb.from('patients').select('*').eq(field, S.currentPractitionerId);
+  PATIENT_LIST = data || [];
+  return PATIENT_LIST;
+}
+
+async function loadFamilyData(){
+  if(FAMILY_DATA) return FAMILY_DATA;
+  await loadCurrentFamilyId();
+  if(!S.currentFamilyId) return null;
+  const { data } = await sb.from('families').select('*').eq('id', S.currentFamilyId).maybeSingle();
+  FAMILY_DATA = data || null;
+  return FAMILY_DATA;
+}
+
+async function loadFamilyPatient(){
+  const family = await loadFamilyData();
+  if(!family) return null;
+  if(family.patient_id){
+    return loadPatientData(family.patient_id);
+  }
+  const { data } = await sb.from('patients').select('*').eq('family_id', family.id).limit(1).maybeSingle();
+  if(data) return loadPatientData(data.id);
+  return null;
+}
+
+async function updatePatientRecord(updates){
+  const patient = await loadPatientData();
+  if(!patient?.id) return null;
+  const { data, error } = await sb.from('patients').update(updates).eq('id', patient.id).select().maybeSingle();
+  if(error){
+    console.warn('updatePatientRecord error', error);
+    return patient;
+  }
+  PATIENT_DATA = {...patient, ...data};
+  return PATIENT_DATA;
+}
+
+async function getOrCreateDoctor(doctorName, doctorPhone){
+  if(!doctorName && !doctorPhone) return null;
+  const query = sb.from('doctors').select('*');
+  const where = doctorPhone ? { phone: doctorPhone } : { name: doctorName };
+  const { data } = await query.match(where).maybeSingle();
+  if(data) return data;
+  const { data: created } = await sb.from('doctors').insert([{ name: doctorName, phone: doctorPhone }]).select().maybeSingle();
+  return created || null;
+}
+
+async function selectPatient(patientId){
+  S.currentPatientId = patientId;
+  PATIENT_DATA = null;
+  await loadPatientData(patientId);
+  render();
+}
+
+async function addPatientForPractitioner(){
+  const name = prompt('Patient name');
+  if(!name) return;
+  const phone = prompt('Patient phone');
+  const { data, error } = await sb.from('patients').insert([{ name, phone, doctor_id: S.currentPractitionerId }]).select().maybeSingle();
+  if(error){ alert('Unable to add patient'); console.warn(error); return; }
+  PATIENT_LIST = null;
+  await loadPractitionerPatients();
+  if(data?.id){
+    S.currentPatientId = data.id;
+    PATIENT_DATA = data;
+  }
+  render();
+}
+
+async function addFamilyMember(patientId){
+  const name = prompt('Family member name');
+  if(!name) return;
+  const phone = prompt('Family member phone');
+  const { data, error } = await sb.from('families').insert([{ name, phone, patient_id: patientId }]).select().maybeSingle();
+  if(error){ alert('Unable to add family member'); console.warn(error); return; }
+  FAMILY_DATA = null;
+  await loadFamilyData();
+  render();
+}
+
+function t(key, ...args){
+  const template = LANG[S.language]?.[key] ?? LANG.en[key] ?? key;
+  return args.length ? template.replace(/\{(\d+)\}/g,(_,i)=>args[i] ?? '') : template;
+}
+
+function languageName(code){
+  return LANG_LABELS[code] || code;
+}
+
+function setLanguage(code){
+  if(LANG[code]){
+    S.language = code;
+    render();
+  }
+}
+
+async function handlePhotoUpload(input){
+  const file = input?.files?.[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const p = await loadPatientData();
+    if(!p) return;
+    p.photo = reader.result;
+    await updatePatientRecord({ photo: p.photo });
+    render();
+  };
+  reader.readAsDataURL(file);
+}
+
+async function saveProfileChanges(){
+  const p = await loadPatientData();
+  if(!p) return;
+  const name = document.getElementById('profileName')?.value.trim() || p.name;
+  const age = document.getElementById('profileAge')?.value.trim() || p.age;
+  const city = document.getElementById('profileCity')?.value.trim() || p.city;
+  const conditions = document.getElementById('profileConditions')?.value || (p.conditions||[]).join(', ');
+  const hospital = document.getElementById('profileHospital')?.value.trim() || p.hospitalName || p.hospital || '';
+  const doctorName = document.getElementById('profileDoctorName')?.value.trim() || (p.doctor?.name || '');
+  const doctorPhone = document.getElementById('profileDoctorPhone')?.value.trim() || (p.doctor?.phone || '');
+
+  const reminderInputs = document.querySelectorAll('.reminderTimeInput');
+  const reminderTimes = Array.from(reminderInputs)
+    .map(input => input.value)
+    .filter(time => time.trim() !== '')
+    .sort();
+
+  const doctor = await getOrCreateDoctor(doctorName, doctorPhone);
+  const updates = {
+    name,
+    age,
+    city,
+    conditions: conditions.split(',').map(s => s.trim()).filter(Boolean),
+    hospitalName: hospital,
+  };
+  if(doctor?.id) updates.doctor_id = doctor.id;
+
+  await updatePatientRecord(updates);
+  if(doctor?.id){
+    PATIENT_DATA.doctor = doctor;
+    PATIENT_DATA.doctor_id = doctor.id;
+  }
+  S.reminderTimes = reminderTimes;
+  S.reminderTime = reminderTimes.length > 0 ? reminderTimes[0] : '';
+
+  if(reminderTimes.length > 0) scheduleReminders();
+  alert(t('profile_saved'));
+  nav('modules');
+}
+
+function addReminderTime(){
+  // Add new empty reminder time and re-render
+  S.reminderTimes.push('');
+  render();
+  // Focus the new input
+  setTimeout(() => {
+    const inputs = document.querySelectorAll('.reminderTimeInput');
+    if(inputs.length > 0) inputs[inputs.length - 1].focus();
+  }, 50);
+}
+
+function removeReminderTime(idx){
+  S.reminderTimes.splice(idx, 1);
+  render();
+}
+
+function editReminders(){
+  nav('profile', null, true);
+}
+
+async function callDoctor(){
+  const p = await loadPatientData();
+  const tel = (p?.doctor?.phone || '').replace(/\s+/g,'');
+  if(!tel) return alert('Doctor contact not available');
+  window.location.href = 'tel:' + tel;
+}
+
+function scheduleReminders(){
+  // Clear existing reminders
+  if(S.reminderTimeouts){
+    S.reminderTimeouts.forEach(timeout => clearTimeout(timeout));
+  }
+  S.reminderTimeouts = [];
+  
+  if(!S.reminderTimes || S.reminderTimes.length === 0) return;
+  
+  S.reminderTimes.forEach((time, idx) => {
+    const [hours, mins] = time.split(':').map(Number);
+    const now = new Date();
+    const target = new Date(now);
+    target.setHours(hours, mins, 0, 0);
+    if(target <= now) target.setDate(target.getDate() + 1);
+    const delay = target - now;
+    
+    const timeout = setTimeout(()=>{
+      alert(`${t('reminder_alert', time)}`);
+    }, delay);
+    S.reminderTimeouts.push(timeout);
+  });
+}
+
+function scheduleReminder(){
+  // Backward compatibility - calls scheduleReminders
+  scheduleReminders();
+}
+
+async function renderProfileEditor(){
+  const p = await loadPatientData();
+  const doctorInfo = typeof p?.doctor === 'object' ? p.doctor : { name: p?.doctor || '', phone: '' };
+  const reminderTimesHtml = S.reminderTimes.map((time, idx) => `
+    <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
+      <input type="time" class="form-input reminderTimeInput" data-idx="${idx}" value="${time}" style="flex:1">
+      <button class="btn btn-sm" style="background:var(--danger-l);color:var(--danger);border:1px solid var(--danger-100)" onclick="removeReminderTime(${idx})">
+        ${I.x.replace('stroke="currentColor"','stroke="var(--danger)"')}
+      </button>
+    </div>
+  `).join('');
+  
+  return `<div class="screen" style="min-height:100vh;background:var(--bg);padding-bottom:24px">
+    <div class="topbar">
+      <button class="topbar-back" onclick="back()">${I.back}</button>
+      <div class="topbar-title">${t('profile_heading')}</div>
+    </div>
+    <div class="profile-card">
+      <div class="profile-top">
+        ${p.photo
+          ? `<img class="profile-photo" src="${p.photo}" alt="${p.name}">`
+          : `<div class="profile-avatar-large" style="background:${p.avatarColor}">${p.avatar}</div>`}
+        <div style="flex:1">
+          <div class="profile-name">${p.name}</div>
+          <div class="profile-meta">${p.city} · ${p.age} yrs</div>
+          <div style="font-size:13px;color:var(--text2);margin-top:8px">
+            ${doctorInfo.name} · ${doctorInfo.phone}
+          </div>
+          <label class="btn btn-outline" style="margin-top:10px;cursor:pointer;display:inline-flex;align-items:center;gap:8px">
+            ${t('upload_photo')}
+            <input type="file" accept="image/*" onchange="handlePhotoUpload(this)" style="display:none">
+          </label>
+        </div>
+      </div>
+      <div class="form-section">
+        <div class="form-group">
+          <label class="form-label">${t('name_label')}</label>
+          <input id="profileName" class="form-input" value="${p.name}">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">${t('age_label')}</label>
+            <input id="profileAge" class="form-input" value="${p.age}">
+          </div>
+          <div class="form-group">
+            <label class="form-label">${t('city_label')}</label>
+            <input id="profileCity" class="form-input" value="${p.city}">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">${t('disease_label')}</label>
+          <input id="profileConditions" class="form-input" value="${p.conditions.join(', ')}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">${t('hospital_name')}</label>
+          <input id="profileHospital" class="form-input" placeholder="${t('hospital_help')}" value="${p.hospitalName||p.hospital||''}">
+        </div>
+        <div class="form-group">
+          <label class="form-label" style="margin-bottom:12px;font-weight:700">👨‍⚕️ Doctor Information</label>
+          <div class="form-row">
+            <div class="form-group" style="margin-bottom:0">
+              <label class="form-label">${t('doctor_name')}</label>
+              <input id="profileDoctorName" class="form-input" placeholder="Dr. Name" value="${doctorInfo.name||''}">
+            </div>
+            <div class="form-group" style="margin-bottom:0">
+              <label class="form-label">${t('doctor_phone')}</label>
+              <input id="profileDoctorPhone" class="form-input" placeholder="+91 XXXXXXXXXX" value="${doctorInfo.phone||''}">
+            </div>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">${t('reminder_time')} (${S.reminderTimes.length})</label>
+          <div style="margin-bottom:12px">
+            ${reminderTimesHtml}
+          </div>
+          <button class="btn btn-outline" style="width:100%;display:flex;align-items:center;justify-content:center;gap:8px" onclick="addReminderTime()">
+            ${I.plus} Add Reminder
+          </button>
+          <div style="font-size:12px;color:var(--text3);margin-top:6px">${t('reminder_help')}</div>
+        </div>
+        <button class="btn btn-primary" onclick="saveProfileChanges()" style="margin-top:12px;margin-bottom:0">${t('save_profile')}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ═══════════════════════════════════════════════════════
+// ICONS (SVG strings)
+// ═══════════════════════════════════════════════════════
+const I = {
+  back: `<svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>`,
+  heart: `<svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>`,
+  activity: `<svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>`,
+  pill: `<svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M10.5 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9.5M14.5 4H20a2 2 0 0 1 2 2v5"/><line x1="6" y1="12" x2="10" y2="12"/><path d="M17.5 14.5 L14 18 L17.5 21.5 L21 18 Z" stroke-linejoin="round"/></svg>`,
+  chat: `<svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`,
+  bell: `<svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>`,
+  user: `<svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,
+  users: `<svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
+  stethoscope: `<svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4.8 2.3A.3.3 0 1 0 5 2H4a2 2 0 0 0-2 2v5a6 6 0 0 0 6 6v0a6 6 0 0 0 6-6V4a2 2 0 0 0-2-2h-1a.2.2 0 1 0 .3.3"/><path d="M8 15v1a6 6 0 0 0 6 6v0a6 6 0 0 0 6-6v-4"/><circle cx="20" cy="10" r="2"/></svg>`,
+  send: `<svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>`,
+  check: `<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>`,
+  x: `<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
+  plus: `<svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
+  calendar: `<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>`,
+  mic: `<svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>`,
+  home: `<svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>`,
+  alert: `<svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`,
+  phone: `<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 13 19.79 19.79 0 0 1 1.62 4.38 2 2 0 0 1 3.62 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>`,
+  eye: `<svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`,
+  shield: `<svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`,
+  trending: `<svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>`,
+  refresh: `<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>`,
+  info: `<svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>`
+};
+
+// ═══════════════════════════════════════════════════════
+// NAVIGATION
+// ═══════════════════════════════════════════════════════
+function nav(screen, sub=null, push=true){
+  if(push) S.navHistory.push({screen:S.screen, sub:S.subScreen});
+  S.screen=screen; S.subScreen=sub;
+  render();
+  setTimeout(() => { document.getElementById('app').scrollTop=0; }, 0);
+}
+function back(){
+  const prev=S.navHistory.pop();
+  if(prev){ S.screen=prev.screen; S.subScreen=prev.sub; render(); }
+}
+
+// ═══════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════
+const AVATAR_COLORS = ['#FFD700','#5BC0EB','#8D6E63','#57A773','#F28A8C','#B39DDB'];
+function avColor(i){ return AVATAR_COLORS[i % AVATAR_COLORS.length]; }
+function initials(n){ return n.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase(); }
+function feelEmoji(f){ return ['','😞','😕','😐','🙂','😊'][f]||'😐'; }
+function feelLabel(f){ return ['','Very poor','Poor','OK','Good','Great'][f]||''; }
+function statusLabel(s){ return {red:'⚠️ Needs attention',amber:'Monitor closely',green:'All good'}[s]||''; }
+
+function svgCircle(pct, r=44, stroke=8, color='#0B7A63'){
+  const c=2*Math.PI*r, dash=c*(pct/100);
+  return `<svg width="${r*2+stroke*2}" height="${r*2+stroke*2}" viewBox="0 0 ${r*2+stroke*2} ${r*2+stroke*2}">
+    <circle cx="${r+stroke}" cy="${r+stroke}" r="${r}" fill="none" stroke="#E5E9F0" stroke-width="${stroke}"/>
+    <circle cx="${r+stroke}" cy="${r+stroke}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}" stroke-dasharray="${dash} ${c}" stroke-dashoffset="0" stroke-linecap="round"/>
+  </svg>`;
+}
+
+function weekBars(){
+  const days=['M','T','W','T','F','S','S'];
+  const data = PATIENT_DATA?.adherenceWeek || [];
+  const max=100;
+  return days.map((d,i)=>{
+    const h=Math.round((data[i]/max)*52), today=i===6;
+    return `<div class="week-bar-wrap">
+      <div class="week-bar" style="height:${h}px;background:${today?'var(--primary)':'var(--primary-100)'};opacity:${today?1:.7}"></div>
+      <div class="week-day" style="color:${today?'var(--primary)':'var(--text3)'};font-weight:${today?700:600}">${d}</div>
+    </div>`;
+  }).join('');
+}
+
+function sparkLine(){
+  const vals=[58,72,60,40,75,78,82];
+  const w=280, h=48, pad=4;
+  const minV=Math.min(...vals)-5, maxV=Math.max(...vals)+5;
+  const pts=vals.map((v,i)=>`${pad+i*(w-2*pad)/6},${h-pad-(v-minV)/(maxV-minV)*(h-2*pad)}`).join(' ');
+  return `<svg width="100%" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+    <defs><linearGradient id="spg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0B7A63" stop-opacity=".25"/><stop offset="100%" stop-color="#0B7A63" stop-opacity="0"/>
+    </linearGradient></defs>
+    <polyline fill="none" stroke="#0B7A63" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="${pts}"/>
+    <polygon fill="url(#spg)" points="${pad},${h} ${pts} ${pad+(vals.length-1)*(w-2*pad)/6},${h}"/>
+  </svg>`;
+}
+
+function doseDot(status){
+  if(status==='na') return `<div class="dose-dot na">—</div>`;
+  if(status==='confirmed') return `<div class="dose-dot confirmed">${I.check}</div>`;
+  if(status==='missed') return `<div class="dose-dot missed">${I.x}</div>`;
+  return `<div class="dose-dot pending">•</div>`;
+}
+
+// ═══════════════════════════════════════════════════════
+// TRIAGE LOGIC
+// ═══════════════════════════════════════════════════════
+const TRIAGE = {
+  chest:{kw:['chest','heart','palpitation','breathless','breathing','pressure'],
+    qs:["Is the pain spreading to your arm, jaw, or back?","Are you also sweating or feeling dizzy along with this?"],
+    result:'er'},
+  fever:{kw:['fever','temperature','chills','shivering','hot'],
+    qs:["How long have you had this fever?","Have you measured your temperature? If yes, what was the reading?"],
+    result:'phc'},
+  headache:{kw:['headache','head pain','migraine','head ache'],
+    qs:["On a scale of 1–10, how severe is the pain?","Is this associated with nausea, vomiting, or sensitivity to light?"],
+    result:'self-care'},
+  stomach:{kw:['stomach','abdomen','nausea','vomit','diarrhea','loose motion','food poison'],
+    qs:["Are you able to keep food and water down?","Have you noticed any blood in stool or vomit?"],
+    result:'telemedicine'},
+  default:{kw:[],
+    qs:["Can you describe when it started and how severe it is on a scale of 1–10?","Do you have any existing conditions like diabetes or hypertension?"],
+    result:'telemedicine'}
+};
+
+const RESULTS = {
+  'self-care': {
+    icon:'🏠', title:'Self-Care at Home', cls:'self-care',
+    body:"Based on your symptoms, this appears to be a mild condition that you can manage at home with rest and basic care.",
+    watch:"Watch for: High fever (>102°F), worsening symptoms after 48 hours, difficulty breathing, or severe pain.",
+    tip:"Stay hydrated, rest well, and take paracetamol if needed for pain or fever."
+  },
+  'phc': {
+    icon:'🏥', title:'Visit a Clinic or PHC', cls:'phc',
+    body:"Your symptoms suggest you should see a doctor at a Primary Health Centre or private clinic today. This is not an emergency but needs medical attention.",
+    watch:"Watch for: High fever with stiff neck, confusion, or difficulty breathing — if these occur, go to ER immediately.",
+    tip:"Nearest PHC: Nashik PHC, Station Road — Open 8 AM–6 PM"
+  },
+  'telemedicine': {
+    icon:'📱', title:'Consult a Doctor Online', cls:'telemedicine',
+    body:"Your symptoms would benefit from a doctor's evaluation. A telemedicine consultation is recommended — you don't need to travel.",
+    watch:"Watch for: If symptoms worsen suddenly or you develop chest pain or breathlessness, go to ER immediately.",
+    tip:"A CareConnect partner doctor can see you within 2 hours via video call."
+  },
+  'er': {
+    icon:'🚨', title:'Go to Emergency Room NOW', cls:'er',
+    body:"Your symptoms are potentially serious and require immediate emergency evaluation. Please do not wait.",
+    watch:"⚠️ Emergency: Call 112 or go to the nearest hospital emergency immediately.",
+    tip:"Nashik Civil Hospital Emergency: +91 253-246-8000"
+  }
+};
+
+function detectFlow(text){
+  const t=text.toLowerCase();
+  for(const [k,v] of Object.entries(TRIAGE)){
+    if(k!=='default' && v.kw.some(kw=>t.includes(kw))) return k;
+  }
+  return 'default';
+}
+
+function triageRespond(userText){
+  if(S.triageState==='idle'){
+    S.triageFlow=detectFlow(userText);
+    S.triageStep=0;
+    const flow=TRIAGE[S.triageFlow];
+    // emergency goes straight to result after 1 question
+    if(S.triageFlow==='chest'){
+      addBotMsg(flow.qs[0], ()=>{S.triageState='questioning'; S.triageStep=1;});
+    } else {
+      S.triageState='questioning';
+      addBotMsg(flow.qs[0]);
+    }
+  } else if(S.triageState==='questioning'){
+    const flow=TRIAGE[S.triageFlow];
+    S.triageStep++;
+    if(S.triageFlow==='chest' || S.triageStep>=flow.qs.length){
+      // show result
+      S.triageState='done';
+      showTriageResult();
+    } else {
+      addBotMsg(flow.qs[S.triageStep]);
+    }
+  }
+}
+
+function addBotMsg(text, cb=null){
+  // show typing first
+  S.cgMessages.push({type:'typing'});
+  render();
+  scrollChat();
+  setTimeout(()=>{
+    S.cgMessages=S.cgMessages.filter(m=>m.type!=='typing');
+    S.cgMessages.push({type:'bot', text});
+    if(cb) cb();
+    render();
+    scrollChat();
+  },1200);
+}
+
+function showTriageResult(){
+  S.cgMessages.push({type:'typing'});
+  render(); scrollChat();
+  setTimeout(()=>{
+    S.cgMessages=S.cgMessages.filter(m=>m.type!=='typing');
+    S.cgMessages.push({type:'result', flow:S.triageFlow});
+    render(); scrollChat();
+  },1500);
+}
+
+function scrollChat(){
+  setTimeout(()=>{
+    const ca=document.querySelector('.chat-area');
+    if(ca) ca.scrollTop=ca.scrollHeight;
+  },50);
+}
+
+// ═══════════════════════════════════════════════════════
+// SCREENS
+// ═══════════════════════════════════════════════════════
+
+// ── LOGIN ──
+function renderLogin() {
+  if (!S.userType) {
+    return `<div class="screen auth-bg" style="min-height:100vh">
+      <div class="auth-hero" style="padding-top:60px;padding-bottom:40px">
+        <div class="auth-logo">
+          <svg width="36" height="36" fill="none" stroke="white"
+            stroke-width="2" viewBox="0 0 24 24">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+        </div>
+        <div class="auth-product">CareConnect</div>
+        <div class="auth-tag">
+          Post-Discharge · Triage · Medication Intelligence
+        </div>
+      </div>
+      <div class="auth-card">
+        <div class="auth-card-title">Who are you?</div>
+        <div class="auth-card-sub">
+          Select your role to continue. This determines
+          what you can access in CareConnect.
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:14px;
+          margin-top:8px">
+
+          <div onclick="selectUserType('clinical')"
+            style="border:2px solid #E5E9F0;border-radius:16px;
+              padding:20px;cursor:pointer;transition:.2s;
+              display:flex;align-items:center;gap:16px;
+              background:#fff"
+            onmouseover="this.style.borderColor='#0B7A63';
+              this.style.background='#E8F5F2'"
+            onmouseout="this.style.borderColor='#E5E9F0';
+              this.style.background='#fff'">
+            <div style="width:52px;height:52px;border-radius:14px;
+              background:#E8F5F2;display:flex;align-items:center;
+              justify-content:center;font-size:26px;flex-shrink:0">
+              👨‍⚕️
+            </div>
+            <div style="flex:1">
+              <div style="font-size:17px;font-weight:700;
+                color:#1A2332;margin-bottom:4px;
+                font-family:'Outfit',sans-serif">
+                Doctor / Nurse
+              </div>
+              <div style="font-size:13px;color:#4B5563;line-height:1.4">
+                Register or login to manage patients,
+                add prescriptions and monitor discharge
+              </div>
+            </div>
+            <div style="color:#0B7A63;font-size:20px">→</div>
+          </div>
+
+          <div onclick="selectUserType('patient')"
+            style="border:2px solid #E5E9F0;border-radius:16px;
+              padding:20px;cursor:pointer;transition:.2s;
+              display:flex;align-items:center;gap:16px;
+              background:#fff"
+            onmouseover="this.style.borderColor='#2563EB';
+              this.style.background='#EFF6FF'"
+            onmouseout="this.style.borderColor='#E5E9F0';
+              this.style.background='#fff'">
+            <div style="width:52px;height:52px;border-radius:14px;
+              background:#EFF6FF;display:flex;align-items:center;
+              justify-content:center;font-size:26px;flex-shrink:0">
+              🏥
+            </div>
+            <div style="flex:1">
+              <div style="font-size:17px;font-weight:700;
+                color:#1A2332;margin-bottom:4px;
+                font-family:'Outfit',sans-serif">
+                Patient / Family Member
+              </div>
+              <div style="font-size:13px;color:#4B5563;line-height:1.4">
+                Login to view health data, medicines
+                and daily check-ins
+              </div>
+            </div>
+            <div style="color:#2563EB;font-size:20px">→</div>
+          </div>
+        </div>
+
+        <div style="margin-top:24px;text-align:center;
+          font-size:12px;color:#9CA3AF">
+          🔒 Your health data is encrypted and stored securely
+        </div>
+      </div>
+    </div>`;
+  }
+
+  const isClinical = S.userType === 'clinical';
+  const accentColor = isClinical ? '#0B7A63' : '#2563EB';
+  const title = isClinical ? 'Doctor / Nurse Login' : 'Patient / Family Login';
+  const subtitle = isClinical
+    ? 'Enter your work email. You can add and manage patients after login.'
+    : 'Enter your email. If your doctor has registered you, your full profile will load automatically.';
+
+  return `<div class="screen auth-bg" style="min-height:100vh">
+    <div class="auth-hero" style="padding-top:48px;padding-bottom:28px">
+      <div class="auth-logo">
+        <div style="font-size:32px">${isClinical ? '👨‍⚕️' : '🏥'}</div>
+      </div>
+      <div class="auth-product" style="font-size:24px">${title}</div>
+      <div class="auth-tag">CareConnect</div>
+    </div>
+    <div class="auth-card">
+      <div class="auth-card-title" style="font-size:20px">
+        Enter your email
+      </div>
+      <div class="auth-card-sub">${subtitle}</div>
+
+      <div class="form-group">
+        <label class="field-label">Email Address</label>
+        <div class="field-wrap">
+          <input class="field-input" id="emailInput"
+            type="email"
+            placeholder="${isClinical
+              ? 'doctor@hospital.com'
+              : 'yourname@gmail.com'}"
+            value="${S.email || ''}"
+            onkeydown="if(event.key==='Enter') handleEmailLogin()">
+        </div>
+      </div>
+
+      <button class="btn btn-primary" id="loginBtn"
+        onclick="handleEmailLogin()"
+        style="background:${accentColor}">
+        Send OTP →
+      </button>
+
+      <button onclick="S.userType=null;render()"
+        style="width:100%;margin-top:12px;padding:12px;
+          border:1.5px solid #E5E9F0;border-radius:12px;
+          background:transparent;color:#4B5563;
+          font-size:14px;font-weight:600;cursor:pointer;
+          font-family:'Outfit',sans-serif">
+        ← Back to role selection
+      </button>
+
+      ${!isClinical ? `
+      <div style="margin-top:20px;background:#FEF3C7;
+        border:1px solid #FCD34D;border-radius:12px;
+        padding:14px 16px;display:flex;gap:10px;
+        align-items:flex-start">
+        <div style="font-size:18px;flex-shrink:0">💡</div>
+        <div style="font-size:13px;color:#92400E;line-height:1.5">
+          First time here? Your doctor needs to add your email
+          to CareConnect first. Once they do, login here and
+          your full profile loads automatically.
+        </div>
+      </div>` : ''}
+
+      <div style="margin-top:16px;text-align:center;
+        font-size:12px;color:#9CA3AF">
+        🔒 Data encrypted · Stored securely in India
+      </div>
+    </div>
+  </div>`;
+}
+
+function selectUserType(type) {
+  S.userType = type;
+  S.email = '';
+  render().then(() => {
+    document.getElementById('emailInput')?.focus();
+  });
+}
+
+async function handleEmailLogin() {
+  const email = document.getElementById('emailInput')?.value?.trim()
+    .toLowerCase();
+  if (!email || !email.includes('@') || !email.includes('.')) {
+    alert('Please enter a valid email address.');
+    return;
+  }
+  S.email = email;
+  S.userTypeHint = S.userType;
+
+  const btn = document.getElementById('loginBtn');
+  if (btn) { btn.textContent = 'Sending...'; btn.disabled = true; }
+
+  const { error } = await sb.auth.signInWithOtp({
+    email,
+    options: {
+      shouldCreateUser: true
+    }
+  });
+
+  if (error) {
+    alert('Could not send OTP: ' + error.message);
+    if (btn) { btn.textContent = 'Send OTP →'; btn.disabled = false; }
+    return;
+  }
+  nav('otp');
+}
+
+// ── OTP ──
+function renderOTP() {
+  return `<div class="screen auth-bg" style="min-height:100vh">
+    <div class="auth-hero" style="padding-top:48px;padding-bottom:24px">
+      <div class="auth-logo">
+        <svg width="32" height="32" fill="none" stroke="white"
+          stroke-width="2" viewBox="0 0 24 24">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+        </svg>
+      </div>
+      <div class="auth-product" style="font-size:22px">Check Your Email</div>
+      <div class="auth-tag">OTP sent to ${S.email}</div>
+    </div>
+    <div class="auth-card">
+      <div class="auth-card-title">Enter 6-digit OTP</div>
+      <div class="auth-card-sub">
+        We sent a 6-digit code to <strong>${S.email}</strong>.
+        Check your inbox and spam folder.
+        Code expires in 10 minutes.
+      </div>
+      <div class="form-group" style="margin-top:8px">
+        <label class="field-label">One-Time Password</label>
+        <input class="field-input" id="otpInput"
+          type="tel" maxlength="6"
+          placeholder="_ _ _ _ _ _"
+          style="font-size:28px;letter-spacing:10px;
+            text-align:center;padding:16px"
+          oninput="if(this.value.length===6) handleOTPVerify()">
+      </div>
+      <button class="btn btn-primary" id="verifyBtn"
+        onclick="handleOTPVerify()">
+        Verify & Continue
+      </button>
+      <button class="btn btn-ghost" style="margin-top:10px"
+        onclick="back()">
+        ← Change Email
+      </button>
+      <div style="margin-top:16px;text-align:center">
+        <span style="font-size:13px;color:var(--text3)">
+          Did not receive it?
+        </span>
+        <button onclick="handleEmailLogin()"
+          style="font-size:13px;color:var(--primary);
+            background:none;border:none;cursor:pointer;
+            font-weight:600;margin-left:6px">
+          Resend OTP
+        </button>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function handleOTPVerify() {
+  const token = document.getElementById('otpInput')?.value?.trim();
+  if (!token || token.length < 6) {
+    alert('Please enter the complete 6-digit code.');
+    return;
+  }
+
+  const btn = document.getElementById('verifyBtn');
+  if (btn) { btn.textContent = 'Verifying...'; btn.disabled = true; }
+
+  const { data, error } = await sb.auth.verifyOtp({
+    email: S.email,
+    token,
+    type: 'email'
+  });
+
+  if (error) {
+    console.error('OTP verify error:', error);
+    alert('Incorrect or expired OTP. Please request a new one.');
+    if (btn) { btn.textContent = 'Verify & Continue'; btn.disabled = false; }
+    return;
+  }
+
+  const authUser = data?.user || data?.session?.user;
+  if (!authUser?.email) {
+    console.error('OTP verify returned no user:', data);
+    alert('Unable to verify your login. Please try again.');
+    if (btn) { btn.textContent = 'Verify & Continue'; btn.disabled = false; }
+    return;
+  }
+
+  await detectRolesAndRoute(authUser);
+}
+
+async function getRolesForEmail(email) {
+  if (!email) return [];
+
+  const { data, error } = await sb.rpc('get_roles_for_email', { p_email: email });
+  if (!error && Array.isArray(data)) {
+    return data;
+  }
+
+  console.warn('get_roles_for_email RPC failed, falling back to users query:', error);
+
+  const { data: users, error: usersError } = await sb
+    .from('users')
+    .select('user_id, email, role, full_name')
+    .eq('email', email);
+
+  if (usersError) {
+    console.error('Fallback getRolesForEmail query failed:', usersError);
+    return [];
+  }
+
+  const roles = await Promise.all((users || []).map(async u => {
+    if (u.role === 'patient') {
+      const { data: patient } = await sb
+        .from('patients')
+        .select('patient_id')
+        .eq('email', u.email)
+        .maybeSingle();
+      return { ...u, linked_patient_id: patient?.patient_id || null };
+    }
+    if (u.role === 'family') {
+      const { data: link } = await sb
+        .from('patient_family_links')
+        .select('patient_id')
+        .eq('family_user_id', u.user_id)
+        .maybeSingle();
+      return { ...u, linked_patient_id: link?.patient_id || null };
+    }
+    return u;
+  }));
+
+  return roles;
+}
+
+function renderNoProfile() {
+  return `<div class="screen auth-bg" style="min-height:100vh">
+    <div class="auth-hero" style="padding-top:48px;padding-bottom:24px">
+      <div class="auth-logo">
+        <svg width="32" height="32" fill="none" stroke="white"
+          stroke-width="2" viewBox="0 0 24 24">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+        </svg>
+      </div>
+      <div class="auth-product" style="font-size:22px">Almost there</div>
+      <div class="auth-tag">CareConnect</div>
+    </div>
+    <div class="auth-card">
+      <div class="auth-card-title">Profile not found</div>
+      <div class="auth-card-sub">
+        We could not find a registered patient or family profile for
+        <strong>${S.email}</strong>.
+      </div>
+      <div style="margin-top:18px;padding:16px;background:#FEF3C7;
+        border:1px solid #FCD34D;border-radius:14px;color:#92400E;
+        font-size:14px;line-height:1.6">
+        Please ask your doctor to add your email to CareConnect.
+        Once they do, return here and login again.
+      </div>
+      <button class="btn btn-primary" style="margin-top:18px"
+        onclick="nav('login', null, false); S.userType=null; S.userTypeHint=null; render();">
+        Back to role selection
+      </button>
+    </div>
+  </div>`;
+}
+
+async function detectRolesAndRoute(authUser) {
+  const roles = await getRolesForEmail(authUser.email);
+
+  if (!roles || roles.length === 0) {
+    if (S.userTypeHint === 'clinical') {
+      await registerNewDoctor(authUser.email);
+    } else {
+      S.email = authUser.email;
+      nav('noProfile');
+    }
+    return;
+  }
+
+  if (roles.length === 1) {
+    await applyRole(roles[0]);
+  } else {
+    availableRoles = roles;
+    nav('roleSelect');
+  }
+}
+
+async function registerNewDoctor(email) {
+  const newUserId = crypto.randomUUID();
+  const name = email.split('@')[0]
+    .replace(/[._]/g, ' ')
+    .replace(/\b\w/g, l => l.toUpperCase());
+
+  const { data: existing, error: existingError } = await sb
+    .from('users')
+    .select('user_id')
+    .eq('email', email)
+    .maybeSingle();
+
+  if (existingError) {
+    console.error('registerNewDoctor existing lookup failed:', existingError);
+  }
+
+  if (existing) {
+    const roles = await getRolesForEmail(email);
+    if (roles && roles.length > 0) {
+      await applyRole(roles[0]);
+    }
+    return;
+  }
+
+  const { error } = await sb.from('users').insert({
+    user_id: newUserId,
+    email: email,
+    full_name: 'Dr. ' + name,
+    role: 'doctor',
+    is_verified: true,
+    is_active: true
+  });
+
+  if (error) {
+    alert('Could not create profile: ' + error.message);
+    return;
+  }
+
+  const roles = await getRolesForEmail(email);
+  if (roles && roles.length > 0) {
+    await applyRole(roles[0]);
+  }
+}
+
+async function applyRole(roleRow) {
+  currentUser = roleRow;
+  S.role = roleRow.role;
+
+  if (roleRow.role === 'patient') {
+    currentPatientId = roleRow.linked_patient_id;
+    if (!currentPatientId && roleRow.email) {
+      const { data: patient } = await sb
+        .from('patients')
+        .select('patient_id')
+        .eq('email', roleRow.email)
+        .maybeSingle();
+      currentPatientId = patient?.patient_id || null;
+    }
+  } else if (roleRow.role === 'family') {
+    const { data: link } = await sb
+      .from('patient_family_links')
+      .select('patient_id')
+      .eq('family_user_id', roleRow.user_id)
+      .maybeSingle();
+    currentPatientId = link?.patient_id || null;
+  } else if (roleRow.role === 'doctor' || roleRow.role === 'nurse') {
+    currentPatientId = null;
+  }
+
+  if (currentPatientId) {
+    await loadAllPatientData();
+  }
+
+  nav('modules');
+}
+
+async function loadAllPatientData() {
+  if (!currentPatientId) return;
+
+  const today = new Date().toISOString().split('T')[0];
+
+  const [patientRes, medRes, logRes, checkinRes] = await Promise.all([
+    sb.from('patients')
+      .select('*')
+      .eq('patient_id', currentPatientId)
+      .single(),
+    sb.from('medications')
+      .select('*')
+      .eq('patient_id', currentPatientId)
+      .eq('is_active', true),
+    sb.from('medication_logs')
+      .select('*')
+      .eq('patient_id', currentPatientId)
+      .gte('scheduled_time', today)
+      .order('scheduled_time', { ascending: true }),
+    sb.from('daily_checkins')
+      .select('*')
+      .eq('patient_id', currentPatientId)
+      .order('checkin_date', { ascending: false })
+      .limit(7)
+  ]);
+
+  currentPatientData = patientRes.data;
+  currentMedications = medRes.data || [];
+  currentMedicationLogs = logRes.data || [];
+  currentCheckins = checkinRes.data || [];
+  PATIENT_DATA = currentPatientData;
+}
+
+// ── ROLE SELECT ──
+function renderRoleSelect() {
+  const icons = {
+    patient: '🏥',
+    family: '👨‍👩‍👧',
+    doctor: '👨‍⚕️',
+    nurse: '👩‍⚕️'
+  };
+  const labels = {
+    patient: 'I am the Patient',
+    family: 'I am a Family Member',
+    doctor: 'I am the Doctor',
+    nurse: 'I am the Nurse'
+  };
+  const desc = {
+    patient: 'View my medicines and daily check-ins',
+    family: 'Monitor my family member\'s health',
+    doctor: 'View and manage my patients',
+    nurse: 'Manage discharge and alerts'
+  };
+  return `<div class="screen" style="background:var(--bg2);min-height:100vh">
+    <div class="topbar">
+      <div class="topbar-title">Who are you today?</div>
+    </div>
+    <div style="padding:16px">
+      <div style="font-size:14px;color:var(--text2);margin-bottom:20px">
+        Multiple profiles found for <strong>${S.email}</strong>.
+        Select how you want to access CareConnect right now.
+      </div>
+      <div class="role-grid">
+        ${availableRoles.map(r => `
+          <div class="role-card" onclick="applyRole(${JSON.stringify(r).replace(/"/g,'&quot;')})">
+            <div class="role-icon" style="background:var(--primary-l);
+              font-size:22px;display:flex;align-items:center;
+              justify-content:center">
+              ${icons[r.role] || '👤'}
+            </div>
+            <div>
+              <div class="role-name">${labels[r.role] || r.role}</div>
+              <div class="role-desc">${desc[r.role] || ''}</div>
+            </div>
+          </div>`).join('')}
+      </div>
+    </div>
+  </div>`;
+}
+
+function setProfileView(profile){
+  if(profile!=='patient' && profile!=='family') return;
+  S.activeProfile = profile;
+  render();
+}
+
+// ── MODULE SELECT ──
+function renderModules(){
+  const roleLabels={patient:'Patient',family:'Family Caregiver',doctor:'Doctor',nurse:'Nurse'};
+  const rn = S.role === 'patient'
+    ? (PATIENT_DATA?.name || 'Patient')
+    : S.role === 'family'
+      ? (FAMILY_DATA?.name || 'Family Caregiver')
+      : (PRACTITIONER_DATA?.name || (S.role === 'doctor' ? 'Doctor' : 'Nurse'));
+  const rl=roleLabels[S.role]||'User';
+  const viewKey = (S.role==='doctor' || S.role==='nurse') ? S.activeProfile : S.role;
+  const profilePersona = PATIENT_DATA || PRACTITIONER_DATA || {}; 
+
+  const modules=[ 
+    {id:'carepath', color:'blue', icon:I.activity, title:'CarePath', fullTitle:'Post-Discharge Navigator',
+     desc:{patient:t('daily_health'),
+           family:t('family_monitor_recovery'),
+           doctor:t('doctor_view_alerts'),
+           nurse:t('nurse_manage_patients')},
+     tag:{patient:t('daily_checkin'),family:t('family_dashboard'),doctor:t('patient_alerts'),nurse:t('nurse_dashboard')}},
+    {id:'caremeds', color:'teal', icon:I.pill, title:'CareMeds', fullTitle:'Medication Coach',
+     desc:{patient:t('medication_coach'),
+           family:t('family_adherence_desc'),
+           doctor:t('doctor_prescription_mgmt'),
+           nurse:t('nurse_medication_review')},
+     tag:{patient:t('my_medicines'),family:t('adherence_tracker'),doctor:t('prescriptions'),nurse:t('med_review')}},
+  ];
+
+  return `<div class="screen" style="min-height:100vh">
+    <div class="hero-header" style="position:relative">
+      <div class="hero-greeting">${t('good_morning')}</div>
+      <div class="hero-name">${rn}</div>
+      <div class="hero-role-badge">
+        ${rl} · ${profilePersona.hospitalName||profilePersona.hospital||''}
+      </div>
+      <div style="position:absolute;top:14px;right:16px;display:flex;flex-direction:column;gap:10px;align-items:flex-end;z-index:50">
+        <select onchange="setLanguage(this.value)" style="background:#fff;color:#0B7A63;border:1.5px solid rgba(255,255,255,.95);border-radius:10px;padding:8px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:'Outfit',sans-serif;min-width:130px;z-index:51;margin-bottom:6px">
+          ${Object.entries(LANG_LABELS).map(([code,label])=>`<option value="${code}" ${S.language===code?'selected':''}>${label}</option>`).join('')}
+        </select>
+        <button type="button" onclick="handleLogout()" style="display:flex;align-items:center;gap:6px;padding:10px 14px;border:none;border-radius:14px;background:rgba(255,255,255,.15);color:#fff;cursor:pointer;font-family:'Outfit',sans-serif;min-width:120px;z-index:52;box-shadow:0 10px 30px rgba(0,0,0,.12)">
+          Sign out
+        </button>
+        <button type="button" onclick="nav('profile')" style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:10px 14px;border:none;border-radius:14px;background:rgba(255,255,255,.12);cursor:pointer;transition:.2s;color:#fff;font-family:'Outfit',sans-serif;min-width:120px;z-index:52;box-shadow:0 10px 30px rgba(0,0,0,.12)">
+          <div class="topbar-avatar" style="background:${profilePersona.avatarColor};overflow:hidden;padding:0;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;min-width:48px;min-height:48px;">
+            ${profilePersona.photo ? `<img src="${profilePersona.photo}" alt="${profilePersona.name}" style="width:100%;height:100%;object-fit:cover">` : profilePersona.avatar}
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:rgba(255,255,255,.95);font-weight:700">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5Z"/></svg>
+            ${t('edit_label')}
+          </div>
+        </button>
+      </div>
+      ${S.role==='doctor' || S.role==='nurse' ? `<div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
+        <button class="btn btn-sm" style="background:${S.activeProfile==='patient'?'#0B7A63':'transparent'}; color:${S.activeProfile==='patient'?'#fff':'var(--text)'}; border:1.5px solid ${S.activeProfile==='patient'?'#0B7A63':'var(--border2)'}" onclick="setProfileView('patient')">Patient / Caretaker</button>
+        <button class="btn btn-sm" style="background:${S.activeProfile==='family'?'#2563EB':'transparent'}; color:${S.activeProfile==='family'?'#fff':'var(--text)'}; border:1.5px solid ${S.activeProfile==='family'?'#2563EB':'var(--border2)'}" onclick="setProfileView('family')">Family Member</button>
+      </div>`:''}
+    </div>
+    <div style="padding:6px 16px 0;display:flex;justify-content:space-between;align-items:center">
+      <div style="font-size:13px;font-weight:700;color:var(--text2);padding-top:14px">${t('choose_module')}</div>
+      ${S.role==='family'?`<div style="margin-top:14px;position:relative;cursor:pointer" onclick="alert('2 new alerts: Atorvastatin missed last night + Suresh Mehta check-in overdue')">
+        ${I.bell.replace('stroke="currentColor"','stroke="var(--text2)"')}
+        <div style="position:absolute;top:-2px;right:-4px;width:16px;height:16px;background:var(--danger);border-radius:50%;font-size:10px;font-weight:700;color:#fff;display:flex;align-items:center;justify-content:center;font-family:'Outfit',sans-serif">${S.notifCount}</div>
+      </div>`:''}
+    </div>
+    <div class="module-grid">
+      ${modules.map(m=>`
+        <div class="module-card ${m.color}" onclick="openModule('${m.id}')">
+          <div class="module-icon ${m.color}">${m.icon.replace('stroke="currentColor"','stroke="white"')}</div>
+          <div class="module-title ${m.color}">${m.title} <span style="font-weight:400;font-size:14px">— ${m.fullTitle}</span></div>
+          <div class="module-sub">${m.desc[viewKey]||m.desc.patient}</div>
+          <div class="module-tag ${m.color}">${m.tag[viewKey]||m.tag.patient}</div>
+        </div>`).join('')}
+    </div>
+    <div style="padding:8px 16px 24px;text-align:center;font-size:12px;color:var(--text3)">
+      EthAum Healthcare Hackathon 2025 · CareConnect MVP v1.0
+    </div>
+  </div>`;
+}
+
+function openModule(mod){
+  nav(mod);
+}
+function initTriage(){
+  if(S.cgMessages.length===0){
+    S.cgMessages=[{type:'bot',text:"Hello! I'm CareGuide, your AI health assistant. 👋\n\nTell me what symptoms or health concerns you're experiencing today, and I'll guide you to the right care."}];
+    S.triageState='idle'; S.triageFlow=null; S.triageStep=0;
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// MODULE: CAREPATH
+// ═══════════════════════════════════════════════════════
+function renderCarePath(){
+  if(S.role==='doctor' || S.role==='nurse'){
+    if(S.activeProfile==='family') return renderCarePathFamily();
+    return renderCarePathNurse();
+  }
+  if(S.role==='family') return renderCarePathFamily();
+  return renderCarePathPatient();
+}
+
+async function renderCarePathNurse(){
+  if(S.subScreen==='discharge') return renderDischargeForm();
+
+  const practitioner = await loadPractitionerData();
+  const patients = await loadPractitionerPatients();
+  const red = patients.filter(x=>x.status==='red').length;
+  const amber = patients.filter(x=>x.status==='amber').length;
+  const title = practitioner?.name || (S.role==='nurse' ? 'Nurse' : 'Doctor');
+
+  return `<div class="screen" style="min-height:100vh">
+    <div class="topbar">
+      <button class="topbar-back" onclick="nav('modules')">${I.back}</button>
+      <div class="topbar-title">CarePath</div>
+      <div class="topbar-avatar" style="background:var(--blue)" title="${title}">${I.stethoscope.replace('stroke="currentColor"','stroke="white"').replace('width="20" height="20"','width="16" height="16"')}</div>
+    </div>
+    <div style="padding:10px 16px 4px">
+      <div style="font-size:13px;color:var(--text2)">${t('post_discharge_dashboard')} · ${title}</div>
+    </div>
+    <div class="stat-row">
+      <div class="stat-chip"><div class="stat-num">${patients.length}</div><div class="stat-label">${t('active_patients')}</div></div>
+      <div class="stat-chip red"><div class="stat-num">${red}</div><div class="stat-label">${t('urgent_alerts')}</div></div>
+      <div class="stat-chip amber"><div class="stat-num">${amber}</div><div class="stat-label">${t('monitor')}</div></div>
+      <div class="stat-chip green"><div class="stat-num">${patients.length-red-amber}</div><div class="stat-label">${t('all_good')}</div></div>
+    </div>
+    ${red>0?`<div class="alert-banner red">${I.alert.replace('stroke="currentColor"','stroke="var(--danger)"')} <span><strong>${t('urgent')}:</strong> ${t('missed_checkins_alert')}</span></div>`:''}
+    <div class="sec-header">
+      <div class="sec-title">${t('active_patients_title')}</div>
+      <button class="sec-action" onclick="addPatientForPractitioner()">+ Add Patient</button>
+    </div>
+    <div>
+      ${patients.length===0?`<div style="padding:16px;color:var(--text2)">No patients assigned yet. Add a patient to begin.</div>`:''}
+      ${patients.map((pt,i)=>`
+        <div class="patient-row" onclick="selectPatient(${pt.id})">
+          <div class="pat-avatar" style="background:${avColor(i)}">${pt.avatar || initials(pt.name)}</div>
+          <div style="flex:1">
+            <div class="pat-name">${pt.name}</div>
+            <div class="pat-sub">${(pt.condition || (pt.conditions||[]).join(' · ') || '')} · ${t('day_label')} ${pt.daysSince || 0}</div>
+            <div class="pat-sub" style="margin-top:2px">${t('last_checkin')}: ${pt.lastCheckin || ''}</div>
+          </div>
+          <div class="pat-status">
+            <span class="badge ${pt.status || 'green'}">${pt.status==='red'?t('status_alert'):pt.status==='amber'?t('status_monitor'):t('status_good')}</span>
+            <div style="font-size:10px;color:var(--text3)">${t('day_label')} ${pt.daysSince || 0}/14</div>
+          </div>
+        </div>`).join('')}
+    </div>
+    <button class="float-btn" onclick="addPatientForPractitioner()">
+      ${I.plus.replace('stroke="currentColor"','stroke="white"')} ${t('discharge_new_patient')}
+    </button>
+  </div>`;
+}
+
+function renderDischargeForm(){
+  const step=S.dischargeStep||0;
+  const stepLabels=[t('patient_details'),t('diagnosis'),t('medicines'),t('protocol')];
+  return `<div class="screen" style="min-height:100vh;background:#fff">
+    <div class="topbar">
+      <button class="topbar-back" onclick="${step>0?'S.dischargeStep--;render()':'nav(\'carepath\')'}">${I.back}</button>
+      <div class="topbar-title">${t('discharge_patient')}</div>
+      <div class="badge blue" style="font-size:11px">${step+1}/4</div>
+    </div>
+    <div class="step-bar">
+      ${[0,1,2,3].map(i=>`<div class="step-dot ${i<step?'done':i===step?'active':''}"></div>`).join('')}
+    </div>
+    <div style="padding:6px 16px 2px;font-size:13px;font-weight:700;color:var(--text3);font-family:'Outfit',sans-serif">${t('step_label', step+1, stepLabels[step])}</div>
+    <div class="form-section" style="flex:1">
+      ${step===0?`
+        <div class="form-row">
+          <div class="form-group"><label class="form-label">${t('first_name')}</label><input class="form-input" placeholder="Ramabai" value="Ramabai"></div>
+          <div class="form-group"><label class="form-label">${t('last_name')}</label><input class="form-input" placeholder="Kulkarni" value="Kulkarni"></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label class="form-label">${t('age_label')}</label><input class="form-input" type="number" placeholder="68" value="68"></div>
+          <div class="form-group"><label class="form-label">${t('gender_label')}</label>
+            <select class="form-select"><option>${t('female')}</option><option>${t('male')}</option><option>${t('other')}</option></select>
+          </div>
+        </div>
+        <div class="form-group"><label class="form-label">${t('mobile_number_label')}</label><input class="form-input" placeholder="+91 94512 78834" value="+91 94512 78834"></div>
+        <div class="form-group"><label class="form-label">${t('emergency_contact')}</label>
+          <input class="form-input" placeholder="Vikram — +91 88765 43210" value="Vikram Kulkarni — +91 88765 43210">
+        </div>
+      `:''}
+      ${step===1?`
+        <div class="form-group"><label class="form-label">${t('primary_diagnosis')}</label>
+          <input class="form-input" placeholder="e.g., Type 2 Diabetes Mellitus" value="Type 2 Diabetes Mellitus, Hypertension">
+        </div>
+        <div class="form-group"><label class="form-label">${t('secondary_diagnoses')}</label>
+          <input class="form-input" placeholder="e.g., Hypothyroidism, CKD Stage 1" value="Hypothyroidism">
+        </div>
+        <div class="form-group"><label class="form-label">${t('discharge_instructions')}</label>
+          <textarea class="form-input" rows="3" style="resize:none">${t('discharge_instructions_example')}</textarea>
+        </div>
+        <div class="form-group"><label class="form-label">${t('follow_up_appointment_date')}</label>
+          <input class="form-input" type="date" value="2025-04-28">
+        </div>
+      `:''}
+      ${step===2?`
+        <div class="alert-banner blue" style="margin:0 0 14px 0">${I.mic.replace('stroke="currentColor"','stroke="var(--blue)"')} <span>${t('tip_voice_dictation')}</span></div>
+        ${[
+          {name:"Metformin 500mg", freq:"BD (Twice Daily)", timing:"Morning + Night"},
+          {name:"Amlodipine 5mg", freq:"OD (Once Daily)", timing:"Morning"},
+          {name:"Levothyroxine 50mcg", freq:"OD (Once Daily)", timing:"Morning (Empty Stomach)"},
+          {name:"Atorvastatin 10mg", freq:"OD (Once Daily)", timing:"Night"},
+        ].map((m,i)=>`
+          <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:12px 14px;margin-bottom:10px;display:flex;align-items:center;gap:10px">
+            <div style="width:32px;height:32px;border-radius:50%;background:${['#E8F5F2','#EFF6FF','#EDE9FE','#FEE2E2'][i]};display:flex;align-items:center;justify-content:center">💊</div>
+            <div style="flex:1">
+              <div style="font-size:14px;font-weight:600;color:var(--text)">${m.name}</div>
+              <div style="font-size:12px;color:var(--text2)">${m.freq} · ${m.timing}</div>
+            </div>
+            <button class="icon-btn danger" onclick="alert('${t('remove_medicine')} ${m.name}')">${I.x}</button>
+          </div>`).join('')}
+        <button class="voice-btn" onclick="alert('${t('voice_dictation_start')}')">
+          ${I.mic} ${t('dictate_more_medicines')}
+        </button>
+        <button class="btn btn-outline btn-sm" onclick="alert('${t('manual_add_medicine')}')">
+          ${I.plus.replace('stroke="currentColor"','stroke="var(--primary)"')} ${t('add_medicine_manually')}
+        </button>
+      `:''}
+      ${step===3?`
+        <div class="form-group">
+          <label class="form-label">${t('daily_checkin_protocol_days')}</label>
+          <select class="form-select">
+            <option value="7">7 ${t('days')}</option><option value="14" selected>14 ${t('days')} (${t('recommended')})</option><option value="30">30 ${t('days')}</option>
+          </select>
+          <div style="font-size:12px;color:var(--text3);margin-top:6px">${t('patient_receive_whatsapp')}</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">${t('alert_conditions')}</label>
+          ${["Feeling score < 3","Pain level > 7","Temperature > 101°F","Red-flag symptom selected","2 consecutive missed check-ins"]
+            .map(cond=>`<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+              <div style="width:20px;height:20px;background:var(--success-l);border-radius:50%;display:flex;align-items:center;justify-content:center">${I.check.replace('stroke="currentColor"','stroke="var(--success)"')}</div>
+              <div style="font-size:14px;color:var(--text)">${cond}</div>
+            </div>`).join('')}
+        </div>
+      `:''}
+    </div>
+    <div class="form-submit">
+      <button class="btn btn-primary" onclick="${step<3?'S.dischargeStep++;render()':'submitDischarge()'}">
+        ${step<3?`${t('continue_button')} →`:`${t('discharge_activate_protocol')}`}
+      </button>
+    </div>
+  </div>`;
+}
+
+async function submitDischarge(){
+  const patientName = document.querySelector(
+    '#newPatientName, input[placeholder*="Ramabai"]')?.value?.trim();
+  const patientEmail = document.querySelector(
+    '#newPatientEmail, input[type="email"]')?.value?.trim().toLowerCase();
+  const familyEmail = document.querySelector(
+    '#familyEmail, input[placeholder*="son@"]')?.value?.trim().toLowerCase();
+
+  if (!patientName || !patientEmail) {
+    alert('Patient name and email are required.'); return;
+  }
+
+  const newPatientId = crypto.randomUUID();
+  const patientUserId = crypto.randomUUID();
+  const inviteCode = Math.random().toString(36)
+    .substring(2, 8).toUpperCase();
+
+  const { error: pe } = await sb.from('patients').insert({
+    patient_id: newPatientId,
+    full_name: patientName,
+    email: patientEmail,
+    created_by: currentUser?.user_id
+  });
+  if (pe) { alert('Error: ' + pe.message); return; }
+
+  await sb.from('users').insert({
+    user_id: patientUserId,
+    email: patientEmail,
+    full_name: patientName,
+    role: 'patient',
+    linked_patient_id: newPatientId,
+    is_verified: false,
+    is_active: true
+  });
+
+  await sb.from('discharge_records').insert({
+    patient_id: newPatientId,
+    discharged_by: currentUser?.user_id,
+    discharge_date: new Date().toISOString().split('T')[0],
+    checkin_protocol_days: 14
+  });
+
+  if (familyEmail) {
+    const familyUserId = crypto.randomUUID();
+    await sb.from('users').insert({
+      user_id: familyUserId,
+      email: familyEmail,
+      full_name: 'Family Member',
+      role: 'family',
+      is_verified: false,
+      is_active: true
+    });
+    await sb.from('patient_family_links').insert({
+      patient_id: newPatientId,
+      family_user_id: familyUserId,
+      relationship: 'family',
+      is_primary_contact: true,
+      invite_code: inviteCode
+    });
+    alert('Patient registered.\n\n' +
+      'Patient email: ' + patientEmail +
+      '\nFamily email: ' + familyEmail +
+      '\n\nBoth can now log in with their email and receive an OTP. ' +
+      'If family shares patient email, they will see a role selector after login.');
+  } else {
+    alert('Patient registered.\n\nPatient email: ' + patientEmail +
+      '\n\nThey can now log in using their email OTP.');
+  }
+
+  S.dischargeStep = 0;
+  nav('carepath', null, false);
+}
+
+async function renderCarePathFamily(){
+  const p = await loadFamilyPatient();
+  const f = await loadFamilyData();
+  if(!p || !f) return `<div class="screen" style="min-height:100vh;padding:24px">${t('unable_to_load_patient_data') || 'Unable to load patient data.'}</div>`;
+  const daysSince = Math.floor((new Date() - new Date(p.dischargeDate)) / (1000 * 60 * 60 * 24));
+  const total=p.medications.reduce((acc,m)=>acc+m.times.length,0);
+  const confirmed=p.medications.reduce((acc,m)=>acc+Object.values(m.logs).filter(v=>v==='confirmed').length,0);
+  const adhPct=total>0?Math.round(confirmed/total*100):0;
+  const doctorName = typeof p.doctor === 'object' ? p.doctor.name : p.doctor || '';
+  return `<div class="screen" style="min-height:100vh">
+    <div class="topbar">
+      <button class="topbar-back" onclick="nav('modules')">${I.back}</button>
+      <div class="topbar-title">CarePath</div>
+      <div class="topbar-avatar" style="background:var(--blue)">${f.name.split(' ').map(n=>n[0]).join('').toUpperCase()}</div>
+    </div>
+    <div class="patient-profile-card" style="margin-top:12px">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px">
+        ${p.photo ? `<img class="profile-photo" src="${p.photo}" alt="${p.name}">` : `<div class="pp-avatar-large" style="background:${p.avatarColor}">${p.avatar}</div>`}
+        <div style="flex:1">
+          <div class="pp-name">${p.name}</div>
+          <div class="pp-meta">${t('patient_profile')} · Age ${p.age} · ${p.city}</div>
+        </div>
+        <button class="topbar-avatar" title="${t('edit_profile')}" onclick="nav('profile')" style="background:${p.avatarColor};border:none;padding:0">
+          ${p.photo ? `<img class="profile-photo" src="${p.photo}" alt="${p.name}">` : p.avatar}
+        </button>
+      </div>
+      <div class="pp-tags">
+        ${p.conditions.map(c=>`<div class="pp-tag">${c}</div>`).join('')}
+      </div>
+      <div class="vitals-row" style="margin-top:12px">
+        <div class="vital-chip"><div class="vital-val">Day ${daysSince}</div><div class="vital-lbl">${t('post_discharge')}</div></div>
+        <div class="vital-chip"><div class="vital-val">${adhPct}%</div><div class="vital-lbl">${t('adherence')}</div></div>
+        <div class="vital-chip"><div class="vital-val">${p.followupDate}</div><div class="vital-lbl">${t('follow_up')}</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">${t('symptom_trend_last_7_days')}</div>
+      <div class="trend-area" style="padding:0">${sparkLine()}</div>
+      <div style="display:flex;justify-content:space-between;margin-top:4px">
+        <div style="font-size:11px;color:var(--text3)">${new Date(Date.now() - 7*24*60*60*1000).toLocaleDateString('en-IN',{month:'short',day:'numeric'})}</div>
+        <div style="font-size:11px;color:var(--primary);font-weight:600">${t('improving')} ↑</div>
+        <div style="font-size:11px;color:var(--text3)">Today</div>
+      </div>
+    </div>
+    <div class="appt-card">
+      <div class="appt-date-box">
+        <div class="appt-date-day">${new Date(p.followupDate).getDate()}</div>
+        <div class="appt-date-month">${new Date(p.followupDate).toLocaleDateString('en-IN',{month:'short'}).toUpperCase()}</div>
+      </div>
+      <div class="appt-info">
+        <div class="appt-dr">${p.doctor}</div>
+        <div class="appt-type">${t('follow_up_consultation')} · ${t('opd')}</div>
+        <span class="badge blue">${t('confirmed')}</span>
+      </div>
+      <button class="icon-btn" onclick="alert('${t('reschedule_appointment')}')">${I.calendar}</button>
+    </div>
+    <div class="sec-header">
+      <div class="sec-title">${t('recent_checkins')}</div>
+      <button class="sec-action" onclick="alert('${t('full_checkin_history')}')">${t('see_all')}</button>
+    </div>
+    ${p.recentCheckins.map(ci=>`
+      <div class="checkin-item">
+        <div class="ci-feel" style="background:${ci.flag?'var(--danger-l)':ci.feeling>=4?'var(--success-l)':ci.feeling===3?'var(--amber-l)':'var(--danger-l)'}">${feelEmoji(ci.feeling)}</div>
+        <div class="ci-meta">
+          <div class="ci-date">${ci.date}${ci.flag?`  <span class="badge red" style="padding:2px 6px">${t('nurse_alerted')}</span>`:''}</div>
+          <div class="ci-feel-label">${feelLabel(ci.feeling)} · ${t('pain_label')}: ${ci.pain}/10</div>
+          ${ci.symptoms.length?`<div class="ci-pain">${t('symptoms')}: ${ci.symptoms.join(', ')}</div>`:''}
+          ${ci.note?`<div class="ci-note">${ci.note}</div>`:''}
+        </div>
+      </div>`).join('')}
+    <div style="padding:16px">
+      <button class="btn btn-blue" onclick="alert('${t('book_appointment_form')}')">
+        ${I.calendar.replace('stroke="currentColor"','stroke="white"')} ${t('book_followup_appointment')}
+      </button>
+    </div>
+  </div>`;
+}
+
+async function renderCarePathPatient(){
+  const p = await loadPatientData();
+  const SYMPTOMS=['Fever','Headache','Nausea','Chest pain','Breathlessness','Weakness','Dizziness','Stomach pain'];
+  return `<div class="screen" style="min-height:100vh">
+    <div class="topbar">
+      <button class="topbar-back" onclick="nav('modules')">${I.back}</button>
+      <div class="topbar-title">${t('daily_checkin')}</div>
+      <span class="badge green">Day 13</span>
+    </div>
+    <div class="patient-profile-card" style="margin:16px 16px 0">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px">
+        ${p.photo ? `<img class="profile-photo" src="${p.photo}" alt="${p.name}">` : `<div class="pp-avatar-large" style="background:${p.avatarColor}">${p.avatar}</div>`}
+        <div style="flex:1">
+          <div class="pp-name">${p.name}</div>
+          <div class="pp-meta">${t('age_years', p.age)} · ${p.city}</div>
+        </div>
+        <button class="topbar-avatar" title="${t('edit_profile')}" onclick="nav('profile')" style="background:${p.avatarColor};border:none;padding:0;cursor:pointer">
+          ${p.photo ? `<img class="profile-photo" src="${p.photo}" alt="${p.name}">` : p.avatar}
+        </button>
+      </div>
+      <div class="pp-tags">
+        ${p.conditions.map(c=>`<div class="pp-tag">${c}</div>`).join('')}
+      </div>
+      <div class="vitals-row" style="margin-top:12px">
+        <div class="vital-chip"><div class="vital-val">Day 13</div><div class="vital-lbl">${t('post_discharge')}</div></div>
+        <div class="vital-chip"><div class="vital-val">${p.adherenceToday}%</div><div class="vital-lbl">${t('adherence')}</div></div>
+        <div class="vital-chip"><div class="vital-val">${p.followupDate}</div><div class="vital-lbl">${t('follow_up')}</div></div>
+      </div>
+    </div>
+    <div style="padding:16px">
+      <div style="font-size:20px;font-weight:700;color:var(--text)">${t('how_are_you')} ${p.name.split(' ')[0]}? 🙏</div>
+      <div style="font-size:14px;color:var(--text2);margin-top:4px">${t('how_are_you_help')}</div>
+    </div>
+    <div class="card">
+      <div class="card-title" style="margin-bottom:4px">${t('overall_feeling')}</div>
+      <div style="font-size:12px;color:var(--text3);margin-bottom:12px">${t('tap_emoji')}</div>
+      <div class="feeling-row">
+        ${[1,2,3,4,5].map(f=>`
+          <div class="feeling-btn ${S.checkinFeel===f?'selected':''}" onclick="S.checkinFeel=${f};render()">
+            ${feelEmoji(f)}
+            <div class="flabel">${['','Bad','Poor','OK','Good','Great'][f]}</div>
+          </div>`).join('')}
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">${t('pain_level')}</div>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+        <span style="font-size:13px;color:var(--text2)">${t('no_pain')}</span>
+        <input type="range" class="pain-slider" min="0" max="10" value="${S.checkinPain}" style="flex:1" oninput="S.checkinPain=parseInt(this.value);document.getElementById('painVal').textContent=this.value">
+        <span style="font-size:13px;color:var(--text2)">${t('severe')}</span>
+      </div>
+      <div style="text-align:center;font-size:28px;font-weight:800;font-family:'Outfit',sans-serif;color:${S.checkinPain<=3?'var(--success)':S.checkinPain<=6?'var(--amber)':'var(--danger)'}">
+        <span id="painVal">${S.checkinPain}</span>/10
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">${t('any_symptoms')}</div>
+      <div style="font-size:12px;color:var(--text3);margin-bottom:8px">${t('tap_all_apply')}</div>
+      <div class="symptom-grid">
+        ${SYMPTOMS.map(s=>`<div class="symptom-chip ${S.checkinSymptoms.includes(s)?'selected':''}" onclick="toggleSymptom('${s}')">${s}</div>`).join('')}
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">${t('anything_else')}</div>
+      <textarea class="form-input" rows="3" style="resize:none" placeholder="${t('symptom_placeholder')}"></textarea>
+    </div>
+    <div style="padding:0 16px 24px">
+      <button class="btn btn-primary" onclick="submitCheckin()" ${S.checkinFeel===0?'disabled style="opacity:.5;cursor:not-allowed"':''}>
+        ${I.check.replace('stroke="currentColor"','stroke="white"')} ${t('submit_checkin')}
+      </button>
+      ${S.checkinFeel===0?`<div style="text-align:center;font-size:12px;color:var(--text3);margin-top:8px">${t('select_feeling_first')}</div>`:''}
+    </div>
+  </div>`;
+}
+
+function toggleSymptom(s){
+  if(S.checkinSymptoms.includes(s)) S.checkinSymptoms=S.checkinSymptoms.filter(x=>x!==s);
+  else S.checkinSymptoms.push(s);
+  render();
+}
+function submitCheckin(){
+  const hasRedFlag=S.checkinSymptoms.some(s=>['Chest pain','Breathlessness'].includes(s));
+  const alertMsg=hasRedFlag?'\n\n⚠️ Nurse Priya Desai has been alerted about the red-flag symptom.':
+    S.checkinFeel<3?'\n\n📬 Your check-in has been sent to your family and nurse.':
+    '\n\n✅ Check-in sent to Vikram and Nurse Priya.';
+  alert(`Check-in submitted! Thank you, Ramabai. 🙏${alertMsg}`);
+  S.checkinFeel=0; S.checkinPain=3; S.checkinSymptoms=[];
+  nav('modules');
+}
+
+// ═══════════════════════════════════════════════════════
+// MODULE: CAREGUIDE
+// ═══════════════════════════════════════════════════════
+function renderCareGuide(){
+  return `<div class="screen" style="display:flex;flex-direction:column;height:100vh">
+    <div class="topbar" style="background:linear-gradient(135deg,#5B21B6,#7C3AED);border:none">
+      <button class="topbar-back" style="color:rgba(255,255,255,.8)" onclick="nav('modules')">${I.back}</button>
+      <div class="topbar-title" style="color:#fff">${t('careguide_title')}</div>
+      <div style="display:flex;align-items:center;gap:6px;padding:4px 10px;background:rgba(255,255,255,.15);border-radius:20px;font-size:11px;font-weight:700;color:#fff;font-family:'Outfit',sans-serif">
+        <div style="width:7px;height:7px;border-radius:50%;background:#4ADE80;animation:pulse 2s ease infinite"></div>
+        ${t('ai_active')}
+      </div>
+    </div>
+    <div style="background:var(--purple-l);padding:10px 14px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--purple-100)">
+      ${I.alert.replace('stroke="currentColor"','stroke="var(--purple)"')}
+      <div style="font-size:11px;color:var(--purple);line-height:1.4">${t('medical_disclaimer')}</div>
+    </div>
+    <div class="chat-area" id="chatArea">
+      ${S.cgMessages.map(m=>renderMessage(m)).join('')}
+    </div>
+    <div class="chat-input-row">
+      <input class="chat-input" id="chatInput" placeholder="${t('describe_symptoms_placeholder')}" ${S.triageState==='done'?'disabled':''}
+        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendTriage()}">
+      <button class="chat-send" id="chatSend" onclick="sendTriage()" ${S.triageState==='done'?'disabled':''}>
+        ${I.send}
+      </button>
+    </div>
+    ${S.triageState==='done'?`<div style="padding:10px 14px;background:var(--bg2);border-top:1px solid var(--border);display:flex;gap:8px">
+      <button class="btn btn-outline btn-sm" onclick="resetTriage()">${t('start_new_consultation')}</button>
+      <button class="btn btn-primary btn-sm" onclick="alert('${t('connecting_doctor')}')">📱 ${t('consult_now')}</button>
+    </div>`:''}
+  </div>`;
+}
+
+function renderMessage(m){
+  if(m.type==='typing'){
+    return `<div class="msg-row">
+      <div class="msg-avatar bot">${I.shield.replace('stroke="currentColor"','stroke="white"').replace('width="20"','width="14"').replace('height="20"','height="14"')}</div>
+      <div class="msg-bubble bot"><div class="typing-dots"><span></span><span></span><span></span></div></div>
+    </div>`;
+  }
+  if(m.type==='bot'){
+    return `<div class="msg-row">
+      <div class="msg-avatar bot">${I.shield.replace('stroke="currentColor"','stroke="white"').replace('width="20"','width="14"').replace('height="20"','height="14"')}</div>
+      <div class="msg-bubble bot" style="white-space:pre-line">${m.text}</div>
+    </div>`;
+  }
+  if(m.type==='user'){
+    return `<div class="msg-row user">
+      <div class="msg-avatar user" style="background:var(--blue-100);color:var(--blue);font-weight:700;font-size:11px;font-family:'Outfit',sans-serif">${S.role==='family'?'VK':S.role==='doctor'?'DR':S.role==='nurse'?'NU':'RK'}</div>
+      <div class="msg-bubble user">${m.text}</div>
+    </div>`;
+  }
+  if(m.type==='result'){
+    const r=RESULTS[TRIAGE[m.flow].result];
+    return `<div style="max-width:95%;margin:0 auto">
+      <div class="triage-result ${r.cls}">
+        <div class="triage-result-icon">${r.icon}</div>
+        <div class="triage-result-title ${r.cls}">${r.title}</div>
+        <div class="triage-result-body">${r.body}</div>
+        <div class="triage-result-watch">
+          <strong>⚠️ Watch for:</strong>${r.watch}
+        </div>
+        <div style="margin-top:10px;font-size:13px;font-weight:600;color:${
+          r.cls==='self-care'?'#166534':r.cls==='phc'?'#1E40AF':r.cls==='telemedicine'?'#5B21B6':'#991B1B'
+        }">💡 ${r.tip}</div>
+        <div class="disclaimer">⚕️ This is AI-generated guidance only. Always consult a qualified doctor before making medical decisions.</div>
+      </div>
+    </div>`;
+  }
+  return '';
+}
+
+function sendTriage(){
+  const inp=document.getElementById('chatInput');
+  const text=inp?.value?.trim();
+  if(!text||S.triageState==='done') return;
+  inp.value='';
+  S.cgMessages.push({type:'user',text});
+  render();
+  scrollChat();
+  triageRespond(text);
+}
+function resetTriage(){
+  S.cgMessages=[]; S.triageState='idle'; S.triageFlow=null; S.triageStep=0;
+  initTriage(); render();
+}
+
+// ═══════════════════════════════════════════════════════
+// MODULE: CAREMEDS
+// ═══════════════════════════════════════════════════════
+function renderCareMeds(){
+  if(S.role==='patient') return renderCareMedsPatient();
+  if(S.role==='doctor'||S.role==='nurse') return renderCareMedsDoctor();
+  return renderCareMedsFamily();
+}
+
+async function renderCareMedsFamily(){
+  const p = await loadPatientData();
+  const f = await loadFamilyData();
+  if(!p || !f) return `<div class="screen" style="min-height:100vh;padding:24px">${t('unable_to_load_patient_data') || 'Unable to load patient data.'}</div>`;
+  const total=p.medications.reduce((acc,m)=>acc+m.times.length,0);
+  const confirmed=p.medications.reduce((acc,m)=>acc+Object.values(m.logs).filter(v=>v==='confirmed').length,0);
+  const missed=p.medications.reduce((acc,m)=>acc+Object.values(m.logs).filter(v=>v==='missed').length,0);
+  const adhPct=Math.round(confirmed/total*100);
+  const weeklyAdh = Math.round((p.adherenceWeek.reduce((a,b)=>a+b,0)||0)/(p.adherenceWeek.length||1));
+  const doctorName = typeof p.doctor === 'object' ? p.doctor.name : p.doctor || '';
+  return `<div class="screen" style="min-height:100vh">
+    <div class="topbar">
+      <button class="topbar-back" onclick="nav('modules')">${I.back}</button>
+      <div class="topbar-title">CareMeds</div>
+      <div class="topbar-avatar" style="background:var(--blue)">${f.name.split(' ').map(n=>n[0]).join('').toUpperCase()}</div>
+    </div>
+    <!-- PATIENT HEADER -->
+    <div style="background:linear-gradient(135deg,#0B7A63,#085A49);padding:16px;color:#fff;display:flex;align-items:center;gap:14px">
+      <div style="width:50px;height:50px;border-radius:50%;background:rgba(255,255,255,.2);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;border:2px solid rgba(255,255,255,.3);flex-shrink:0">${p.avatar}</div>
+      <div style="flex:1">
+        <div style="font-size:16px;font-weight:700">${p.name}</div>
+        <div style="font-size:12px;opacity:.8">${(p.conditions||[]).join(' · ')}</div>
+        <div style="font-size:11px;opacity:.6;margin-top:3px">Last sync: ${p.lastCheckin || ''} · Dr. ${doctorName.replace('Dr. ','')}</div>
+      </div>
+      <button class="icon-btn" style="background:rgba(255,255,255,.15);border-color:rgba(255,255,255,.3);color:#fff" onclick="alert('${t('sync_alert_message')}')">
+        ${I.refresh.replace('stroke="currentColor"','stroke="white"')} ${t('sync')}
+      </button>
+    </div>
+    <!-- ADHERENCE STATS -->
+    <div class="stat-row">
+      <div class="stat-chip">
+        <div class="stat-num" style="color:var(--primary)">${adhPct}%</div>
+        <div class="stat-label">${t('today')}</div>
+      </div>
+      <div class="stat-chip green">
+        <div class="stat-num">${confirmed}</div>
+        <div class="stat-label">${t('confirmed')}</div>
+      </div>
+      <div class="stat-chip red">
+        <div class="stat-num">${missed}</div>
+        <div class="stat-label">${t('missed')}</div>
+      </div>
+      <div class="stat-chip amber">
+        <div class="stat-num">${total-confirmed-missed}</div>
+        <div class="stat-label">${t('pending')}</div>
+      </div>
+    </div>
+    <!-- MISSED DOSE ALERT -->
+    ${missed>0?`<div class="alert-banner red">
+      ${I.alert.replace('stroke="currentColor"','stroke="var(--danger)"')}
+      <div><strong>${t('missed_dose_alert_title')}</strong><br>${t('missed_dose_alert_body')}</div>
+    </div>`:''}
+    <!-- DOSE GRID -->
+    <div class="card">
+      <div class="card-title">${t('todays_dose_schedule')}</div>
+      <div style="overflow-x:auto">
+        <table class="med-table">
+          <tr><th style="text-align:left">${t('medicine')}</th><th>🌅 ${t('morning')}</th><th>☀️ ${t('afternoon')}</th><th>🌆 ${t('evening')}</th><th>🌙 ${t('night')}</th></tr>
+          ${p.medications.map(m=>`
+            <tr>
+              <td>
+                <div style="display:flex;align-items:center;gap:6px">
+                  <div style="width:8px;height:8px;border-radius:50%;background:${m.color};flex-shrink:0"></div>
+                  <span style="font-size:12px">${m.name}</span>
+                </div>
+              </td>
+              <td>${doseDot(m.logs.morning)}</td>
+              <td>${doseDot(m.logs.afternoon)}</td>
+              <td>${doseDot(m.logs.evening)}</td>
+              <td>${doseDot(m.logs.night)}</td>
+            </tr>`).join('')}
+        </table>
+      </div>
+      <div style="display:flex;gap:12px;margin-top:12px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)"><div class="dose-dot confirmed" style="width:16px;height:16px;font-size:9px">${I.check.replace('stroke="currentColor"','stroke="var(--success)"')}</div>${t('confirmed')}</div>
+        <div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)"><div class="dose-dot missed" style="width:16px;height:16px;font-size:9px">${I.x.replace('stroke="currentColor"','stroke="var(--danger)"')}</div>${t('missed')}</div>
+        <div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)"><div class="dose-dot pending" style="width:16px;height:16px"></div>${t('pending')}</div>
+      </div>
+    </div>
+    <!-- WEEKLY TREND -->
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <div class="card-title" style="margin:0">${t('weekly_adherence')}</div>
+        <div style="font-size:22px;font-weight:800;font-family:'Outfit',sans-serif;color:var(--primary)">${weeklyAdh}%</div>
+      </div>
+      <div class="week-bars">${weekBars()}</div>
+      <div style="display:flex;justify-content:space-between;margin-top:8px;font-size:11px;color:var(--text3)">
+        <span>${t('last_monday')}</span><span>${t('this_sunday')}</span>
+      </div>
+    </div>
+    <!-- DRUG INTERACTION -->
+    <div class="interaction-flag">
+      ${I.alert.replace('stroke="currentColor"','stroke="var(--warn)"')}
+      <div>
+        <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:3px">${t('drug_interaction_notice')}</div>
+        <div style="font-size:12px;color:var(--text2)">${t('drug_interaction_body')}</div>
+      </div>
+    </div>
+    <!-- MEDICINES LIST -->
+    <div class="sec-header">
+      <div class="sec-title">${t('medicine_list')}</div>
+      <button class="sec-action" onclick="nav('caremeds','addmed')">+ ${t('add')}</button>
+    </div>
+    ${p.medications.map(m=>`
+      <div class="rx-card">
+        <div class="rx-header">
+          <div style="display:flex;align-items:center;gap:10px">
+            <div style="width:36px;height:36px;border-radius:50%;background:${m.bg};display:flex;align-items:center;justify-content:center;font-size:16px">💊</div>
+            <div>
+              <div class="rx-med-name">${m.name}</div>
+              <div class="rx-med-detail">${m.freq} · ${m.times.join(' + ')}</div>
+            </div>
+          </div>
+          <span class="badge ${Object.values(m.logs).includes('missed')?'red':Object.values(m.logs).includes('confirmed')?'green':'amber'}">
+            ${Object.values(m.logs).includes('missed')?'Missed today':Object.values(m.logs).includes('confirmed')?'Confirmed':'Pending'}
+          </span>
+        </div>
+        <div class="rx-actions">
+          <button class="icon-btn" onclick="alert('Edit ${m.name} schedule: dose, timing, frequency')">${I.calendar} Edit Schedule</button>
+          <button class="icon-btn" onclick="alert('Pause reminders for ${m.name} for today?')">${I.info} Pause</button>
+        </div>
+      </div>`).join('')}
+    <div style="padding:12px 16px 16px">
+      <div style="font-size:11px;color:var(--text3);text-align:center">${t('next_ivr_call_info')}</div>
+    </div>
+  </div>`;
+}
+
+async function renderCareMedsDoctor(){
+  const p = await loadPatientData();
+  return `<div class="screen" style="min-height:100vh">
+    <div class="topbar">
+      <button class="topbar-back" onclick="nav('modules')">${I.back}</button>
+      <div class="topbar-title">CareMeds</div>
+      <div class="topbar-avatar" style="background:var(--purple)">DR</div>
+    </div>
+    <div style="background:linear-gradient(135deg,#5B21B6,#7C3AED);padding:16px;color:#fff">
+      <div style="font-size:16px;font-weight:700">${S.role==='doctor'?'Dr. Rajesh Sharma — Prescription Manager':'Nurse Priya Desai — Medication Review'}</div>
+      <div style="font-size:13px;opacity:.8;margin-top:2px">Nashik Civil Hospital · ${S.role==='doctor'?'OPD Block B':'Ward 3'}</div>
+    </div>
+    <div style="padding:14px 16px 8px">
+      <div class="form-group" style="margin:0">
+        <div style="position:relative">
+          <div style="position:absolute;left:12px;top:50%;transform:translateY(-50%)">${I.user.replace('stroke="currentColor"','stroke="var(--text3)"')}</div>
+          <input class="form-input" style="padding-left:40px" placeholder="Search patient..." value="Ramabai Kulkarni" onclick="alert('Patient search would open — type to filter active patients')">
+        </div>
+      </div>
+    </div>
+    <!-- VOICE PRESCRIPTION -->
+    <div style="padding:0 16px 14px">
+      <div class="card-title" style="margin-bottom:10px">Add New Prescription</div>
+      <button class="voice-btn ${S.rxRecording?'recording':''}" id="voiceBtn" onclick="toggleRecording()">
+        ${I.mic} ${S.rxRecording?'🔴 Recording — speak medicine name and dose...':'Dictate Prescription by Voice'}
+      </button>
+      ${S.rxRecording?`<div style="background:var(--danger-l);border-radius:var(--r-sm);padding:10px;font-size:13px;color:var(--danger);margin-bottom:8px;font-style:italic">
+        "Metformin five hundred milligrams, twice daily, morning and night, for 30 days..."
+        <div style="font-size:11px;margin-top:6px;color:var(--text2);font-style:normal">Transcribing via AI... <span style="color:var(--primary)">Auto-extracting medicine, dose, frequency</span></div>
+      </div>`:``}
+    </div>
+    <!-- CURRENT PATIENT -->
+    <div class="patient-profile-card" style="margin:0 16px 14px">
+      <div class="pp-name">${p.name}</div>
+      <div class="pp-meta">Age ${p.age} · ${p.hospital}</div>
+      <div class="pp-tags">
+        ${p.conditions.map(c=>`<div class="pp-tag">${c}</div>`).join('')}
+      </div>
+      <div class="vitals-row" style="margin-top:12px">
+        <div class="vital-chip"><div class="vital-val">78%</div><div class="vital-lbl">Adherence</div></div>
+        <div class="vital-chip"><div class="vital-val">1 missed</div><div class="vital-lbl">Today</div></div>
+        <div class="vital-chip"><div class="vital-val">Day 13</div><div class="vital-lbl">Post-D</div></div>
+      </div>
+    </div>
+    <div class="interaction-flag" style="margin:0 16px 12px">
+      ${I.alert.replace('stroke="currentColor"','stroke="var(--warn)"')}
+      <div><strong style="font-size:13px">Drug Interaction Detected:</strong>
+        <div style="font-size:12px;margin-top:3px">Amlodipine + Atorvastatin — Moderate: Monitor for myopathy. Consider dose adjustment if symptoms arise.</div>
+      </div>
+    </div>
+    <div class="sec-header">
+      <div class="sec-title">Current Prescription</div>
+      <button class="sec-action" onclick="alert('Add medicine manually — form would open here')">+ Add</button>
+    </div>
+    ${p.medications.map(m=>`
+      <div class="rx-card">
+        <div class="rx-header">
+          <div>
+            <div class="rx-med-name">${m.name}</div>
+            <div class="rx-med-detail">${m.freq} · ${m.times.join(', ')} · ${p.name}</div>
+          </div>
+          <span class="badge teal">Active</span>
+        </div>
+        <div class="rx-badge-row">
+          <span class="badge blue">Prescribed: Apr 1</span>
+          <span class="badge ${Object.values(m.logs).includes('missed')?'red':'green'}">
+            ${Object.values(m.logs).includes('missed')?'Missed today':'Adherent'}
+          </span>
+        </div>
+        <div class="rx-actions">
+          <button class="icon-btn" onclick="alert('Edit ${m.name}: change dose, frequency, duration')">${I.calendar} Edit</button>
+          <button class="icon-btn danger" onclick="if(confirm('Stop ${m.name} for this patient?')) alert('Stopped. Patient and family will be notified.')">${I.x} Stop</button>
+        </div>
+      </div>`).join('')}
+    <div style="padding:16px;padding-bottom:24px">
+      <button class="btn btn-primary" onclick="alert('Weekly adherence report for Ramabai Kulkarni:\n\n• Week 1: 82% adherence\n• Week 2 (current): 78% — Atorvastatin missed twice\n\nRecommendation: Discuss evening reminder setup with family.')">
+        ${I.trending.replace('stroke="currentColor"','stroke="white"')} View Adherence Report
+      </button>
+    </div>
+  </div>`;
+}
+
+function toggleRecording(){
+  S.rxRecording=!S.rxRecording;
+  if(!S.rxRecording){
+    render();
+    setTimeout(()=>{
+      alert('✅ Prescription transcribed:\n\nMetformin 500mg — BD (Twice Daily)\nMorning + Night\nDuration: 30 days\n\nThis has been added to Ramabai\'s CareMeds schedule.');
+    },300);
+  } else { render(); }
+}
+
+async function renderCareMedsPatient(){
+  const p = await loadPatientData();
+  const timeSlots=['Morning','Afternoon','Evening','Night'];
+  const timeKeys=['morning','afternoon','evening','night'];
+  const timeEmoji=['🌅','☀️','🌆','🌙'];
+  // Only show relevant slots (where at least 1 med is scheduled)
+  const slots=timeKeys.filter(k=>p.medications.some(m=>m.logs[k]!=='na'));
+  return `<div class="screen" style="min-height:100vh;background:var(--bg)">
+    <div class="topbar" style="background:#fff">
+      <button class="topbar-back" onclick="nav('modules')">${I.back}</button>
+      <div class="topbar-title">My Medicines</div>
+      <div style="font-size:12px;color:var(--text3)">Today</div>
+    </div>
+    <div style="padding:16px">
+      <div style="font-size:22px;font-weight:700;color:var(--text)">नमस्ते, Ramabai 🙏</div>
+      <div style="font-size:14px;color:var(--text2);margin-top:4px">Today's medicines — ${new Date().toLocaleDateString('en-IN',{weekday:'long',day:'numeric',month:'long'})}</div>
+    </div>
+    ${slots.map(slot=>{
+      const meds=p.medications.filter(m=>m.logs[slot]!=='na');
+      const idx=timeKeys.indexOf(slot);
+      const allDone=meds.every(m=>{
+        const key=`${m.id}:${slot}`;
+        return S.medDoseState[key]==='confirmed'||m.logs[slot]==='confirmed';
+      });
+      return `<div style="padding:0 16px 4px">
+        <div style="font-size:13px;font-weight:700;color:var(--text3);margin-bottom:8px;font-family:'Outfit',sans-serif">${timeEmoji[idx]} ${timeSlots[idx]}</div>
+        ${meds.map(m=>{
+          const key=`${m.id}:${slot}`;
+          const ds=S.medDoseState[key]||m.logs[slot]||'pending';
+          return `<div class="today-pill">
+            <div class="pill-header">
+              <div class="pill-icon" style="background:${m.bg}"><span style="font-size:20px">💊</span></div>
+              <div style="flex:1">
+                <div style="font-size:16px;font-weight:700;color:var(--text)">${m.name}</div>
+                <div style="font-size:13px;color:var(--text2)">${m.generic} · 1 tablet</div>
+              </div>
+              <span class="badge ${ds==='confirmed'?'green':ds==='missed'?'red':'amber'}">
+                ${ds==='confirmed'?'✓ Taken':ds==='missed'?'✗ Missed':'Pending'}
+              </span>
+            </div>
+            <div class="pill-body">
+              ${ds==='pending'?`
+                <button class="confirm-btn take" onclick="confirmDose(${m.id},'${slot}')">
+                  ${I.check.replace('stroke="currentColor"','stroke="var(--success)"')} I have taken this medicine
+                </button>
+                <button class="confirm-btn missed" style="margin-top:6px" onclick="markMissed(${m.id},'${slot}')">
+                  ${I.x.replace('stroke="currentColor"','stroke="var(--danger)"')} I could not take it
+                </button>
+              `:''}
+              ${ds==='confirmed'?`
+                <div style="display:flex;align-items:center;gap:8px;padding:8px;background:var(--success-l);border-radius:var(--r-sm);color:#166534;font-size:13px;font-weight:600">
+                  ${I.check.replace('stroke="currentColor"','stroke="#166534"')} Confirmed at 8:32 AM — Great job! 🎉
+                </div>
+                <button class="btn btn-outline" style="width:100%;margin-top:8px;font-size:12px;padding:8px;color:var(--primary)" onclick="editMedicineStatus(${m.id},'${slot}')">
+                  Edit
+                </button>
+              `:''}
+              ${ds==='missed'?`
+                <div style="display:flex;align-items:center;gap:8px;padding:8px;background:var(--danger-l);border-radius:var(--r-sm);color:var(--danger);font-size:13px;font-weight:600">
+                  ${I.alert.replace('stroke="currentColor"','stroke="var(--danger)"')} Missed — Vikram has been notified
+                </div>
+                <button class="btn btn-outline" style="width:100%;margin-top:8px;font-size:12px;padding:8px;color:var(--primary)" onclick="editMedicineStatus(${m.id},'${slot}')">
+                  Edit
+                </button>
+              `:''}
+            </div>
+          </div>`;
+        }).join('')}
+      </div>`;
+    }).join('')}
+    <!-- NEXT REMINDER -->
+    ${S.reminderTimes && S.reminderTimes.length > 0 ? `
+    <div style="padding:0 16px">
+      <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:12px">Scheduled Reminders (${S.reminderTimes.length})</div>
+      ${S.reminderTimes.map((time, idx) => `
+      <div class="card" style="background:linear-gradient(135deg,var(--primary-l),#fff);border-color:var(--primary-100);margin-bottom:8px">
+        <div style="display:flex;align-items:center;gap:12px">
+          ${I.bell.replace('stroke="currentColor"','stroke="var(--primary)"')}
+          <div style="flex:1">
+            <div style="font-size:13px;font-weight:700;color:var(--text)">Reminder ${idx + 1}</div>
+            <div style="font-size:15px;font-weight:700;color:var(--primary);margin-top:1px">${time}</div>
+            <div style="font-size:12px;color:var(--text2)">App notification</div>
+          </div>
+          <button class="btn btn-sm" style="background:var(--danger-l);color:var(--danger);border:none;padding:8px 12px" onclick="editReminders()">Edit</button>
+        </div>
+      </div>
+      `).join('')}
+    </div>
+    ` : `
+    <div class="card" style="background:linear-gradient(135deg,#E8F5F2,#fff);border-color:#D1E6E3;padding:20px">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+        ${I.bell.replace('stroke="currentColor"','stroke="var(--primary)"')}
+        <div>
+          <div style="font-size:15px;font-weight:700;color:var(--text)">No Reminders Set</div>
+          <div style="font-size:13px;color:var(--text2);margin-top:2px">Add medication reminders in your profile</div>
+        </div>
+      </div>
+      <button class="btn" style="width:100%;background:var(--primary);color:#fff;border:none;display:flex;align-items:center;justify-content:center;gap:8px" onclick="editReminders()">
+        ${I.plus} Set Reminder
+      </button>
+    </div>
+    `}
+    <div style="padding:0 16px 24px">
+      <button class="btn btn-ghost" onclick="callDoctor()">
+        ${I.phone.replace('stroke="currentColor"','stroke="var(--text2)"')} ${t('call_my_doctor')}
+      </button>
+      <div style="font-size:12px;color:var(--text3);margin-top:8px">${(PATIENT_DATA?.doctor?.phone||'')}</div>
+    </div>
+  </div>`;
+}
+
+function confirmDose(id, slot){
+  S.medDoseState[`${id}:${slot}`]='confirmed';
+  render();
+}
+
+function markMissed(id, slot){
+  S.medDoseState[`${id}:${slot}`]='missed';
+  render();
+}
+
+function editMedicineStatus(id, slot){
+  // Reset to pending to allow re-selection
+  delete S.medDoseState[`${id}:${slot}`];
+  render();
+}
+
+// ═══════════════════════════════════════════════════════
+// MAIN RENDER
+// ═══════════════════════════════════════════════════════
+async function render(){
+  const app=document.getElementById('app');
+  await ensureUserContext();
+  let html='';
+  switch(S.screen){
+
+    case 'login': html=renderLogin(); break;
+    case 'otp': html=renderOTP(); break;
+    case 'roleSelect': html=renderRoleSelect(); break;
+    case 'noProfile': html=renderNoProfile(); break;
+    case 'modules': html=renderModules(); break;
+    case 'carepath': html=renderCarePath(); break;
+    case 'caremeds': html=renderCareMeds(); break;
+    case 'profile': html=renderProfileEditor(); break;
+    default: html=renderLogin();
+  }
+  app.innerHTML = await html;
+  // re-attach OTP inputs after render
+  if(S.screen==='otp'){
+    [0,1,2,3].forEach(i=>{
+      const el=document.getElementById(`otp${i}`);
+      if(el){ el.value=S.otp[i]; }
+    });
+  }
+  // scroll chat to bottom
+  if(S.screen==='careguide'){
+    setTimeout(()=>{
+      const ca=document.getElementById('chatArea');
+      if(ca) ca.scrollTop=ca.scrollHeight;
+    },50);
+  }
+}
+
+async function handleLogout() {
+  S.userType = null;
+  S.userTypeHint = null;
+  await sb.auth.signOut();
+  currentUser = null;
+  currentPatientId = null;
+  currentPatientData = null;
+  currentMedications = [];
+  currentMedicationLogs = [];
+  currentCheckins = [];
+  availableRoles = [];
+  S.role = null;
+  S.email = '';
+  S.navHistory = [];
+  nav('login', null, false);
+}
+
+async function init() {
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    if (session?.user) {
+      await detectRolesAndRoute(session.user);
+    } else {
+      render();
+    }
+  } catch (e) {
+    console.error('Init error:', e);
+    render();
+  }
+}
+
+sb.auth.onAuthStateChange(async (event, session) => {
+  if (event === 'SIGNED_IN' && session?.user) {
+    await detectRolesAndRoute(session.user);
+  } else if (event === 'SIGNED_OUT') {
+    handleLogout();
+  }
+});
+
+init();
+document.getElementById('app').addEventListener('click',e=>{
+  // global click delegation for future use
+});
+
+// Keyboard shortcut — escape returns to modules (dev helper)
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&S.screen!=='login'&&S.screen!=='otp'&&S.screen!=='role'){
+    nav('modules');
+  }
+});
+</script>
+</body>
+</html>

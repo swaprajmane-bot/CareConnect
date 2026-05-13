@@ -1,0 +1,5 @@
+Site - http://localhost:8000
+
+project url - https://gselacajyzbdjztmzgix.supabase.co
+
+publishable key - sb_publishable_fNI8VloEiwFK_Zq3vZQUHw_y4xiweV2
