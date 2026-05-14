@@ -19,29 +19,43 @@
 // STATE
 // ═══════════════════════════════════════════════════════
 const S = {
-  screen: 'login',   // login|otp|role|modules|carepath|careguide|caremeds
+  screen: 'login',
   subScreen: null,
-  role: null,        // patient|family|doctor|nurse
-  phone: '',
-  email: '',
-  userType: null, // 'clinical' or 'patient'
-  userTypeHint: null,
+  role: null,
+  phone: '', email: '',
+  userType: null, userTypeHint: null,
   otp: ['','','',''],
   navHistory: [],
   cpTab: 0, cmTab: 0, cgMessages: [],
   triageState: 'idle', triageFlow: null, triageStep: 0,
-  selectedRole: null,
-  activeProfile: 'patient',
-  reminderTimes: [],
-  reminderTime: '',
-  reminderTimeouts: [],
+  selectedRole: null, activeProfile: 'patient',
+  reminderTimes: [], reminderTime: '', reminderTimeouts: [],
   checkinStep: 0, checkinFeel: 0, checkinPain: 3, checkinSymptoms: [],
-  dischargeStep: 0,
-  rxRecording: false,
-  medDoseState: {},  // Format: "medicineId:timeSlot" -> "pending|confirmed|missed"
-  notifCount: 2,
-  language: 'en'
+  otherSymptomText: '', checkinAppetite: '',
+  dischargeStep: 0, rxRecording: false,
+  medDoseState: {}, medNotes: {}, showMedHistoryId: null,
+  notifCount: 2, language: 'en',
+  showAddPatientModal: false, addPatientStep: 0, newPrescriptions: [],
+  noProfileNudge: false, selectedDoctorPatient: null,
 };
+
+// Demo weekly adherence data (med_index -> [Mon..Sun])
+const DEMO_WEEK = [
+  ['confirmed','confirmed','confirmed','missed','confirmed','confirmed','pending'],
+  ['confirmed','confirmed','confirmed','confirmed','confirmed','confirmed','pending'],
+  ['confirmed','missed','confirmed','confirmed','missed','confirmed','pending'],
+];
+const WEEK_DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+// Demo check-in history for patients
+const DEMO_CHECKINS = [
+  {date:new Date(Date.now()-0*864e5).toISOString().split('T')[0],feeling:2,pain:7,symptoms:['Chest pain','Breathlessness'],note:'Feeling very unwell',flag:true},
+  {date:new Date(Date.now()-1*864e5).toISOString().split('T')[0],feeling:3,pain:5,symptoms:['Headache'],note:'Mild headache',flag:false},
+  {date:new Date(Date.now()-2*864e5).toISOString().split('T')[0],feeling:4,pain:3,symptoms:[],note:'Feeling better',flag:false},
+  {date:new Date(Date.now()-3*864e5).toISOString().split('T')[0],feeling:4,pain:4,symptoms:['Nausea'],note:'',flag:false},
+  {date:new Date(Date.now()-4*864e5).toISOString().split('T')[0],feeling:5,pain:2,symptoms:[],note:'Great day!',flag:false},
+  {date:new Date(Date.now()-5*864e5).toISOString().split('T')[0],feeling:3,pain:5,symptoms:['Weakness'],note:'',flag:false},
+  {date:new Date(Date.now()-6*864e5).toISOString().split('T')[0],feeling:2,pain:6,symptoms:['Fever','Headache'],note:'High temp evening',flag:true},
+];
 
 const LANG_LABELS = {
   en: 'English', hi: 'हिन्दी'
@@ -417,6 +431,47 @@ const SUPABASE_ANON_KEY = 'sb_publishable_fNI8VloEiwFK_Zq3vZQUHw_y4xiweV2'; // R
 
 // Initialize Supabase client
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// Self-healing DB writes: track columns Supabase rejects and never send them again.
+// On first bad-column error, the column is cached and the write retried automatically.
+const REJECTED_COLS = {}; // { tableName: Set<colName> }
+
+async function safeUpsert(table, record, opts = {}) {
+  const bad = REJECTED_COLS[table] || new Set();
+  const clean = Object.fromEntries(Object.entries(record).filter(([k]) => !bad.has(k)));
+  const { data, error } = await sb.from(table).upsert(clean, opts);
+  if (error) {
+    const m = error.message.match(/Could not find the '([^']+)' column/);
+    if (m) {
+      if (!REJECTED_COLS[table]) REJECTED_COLS[table] = new Set();
+      REJECTED_COLS[table].add(m[1]);
+      console.warn(`[schema] dropping unknown col '${m[1]}' from ${table}`);
+      return safeUpsert(table, record, opts); // retry without the bad column
+    }
+  }
+  return { data, error };
+}
+
+async function safeInsert(table, record) {
+  const bad = REJECTED_COLS[table] || new Set();
+  const clean = Object.fromEntries(Object.entries(record).filter(([k]) => !bad.has(k)));
+  const { data, error } = await sb.from(table).insert(clean);
+  if (error) {
+    const m = error.message.match(/Could not find the '([^']+)' column/);
+    if (m) {
+      if (!REJECTED_COLS[table]) REJECTED_COLS[table] = new Set();
+      REJECTED_COLS[table].add(m[1]);
+      console.warn(`[schema] dropping unknown col '${m[1]}' from ${table}`);
+      return safeInsert(table, record);
+    }
+  }
+  return { data, error };
+}
+
+// Stub — no longer needed but kept so existing callers don't break
+async function getTableColumns() { return []; }
+function pickColumns(schema, candidates) { return candidates; }
+
 let currentUser = null;
 let currentPatientId = null;
 let currentPatientData = null;
@@ -430,71 +485,68 @@ let FAMILY_DATA = null;
 let PATIENT_LIST = null;
 
 async function ensureUserContext(){
-  if(S.role==='patient'){
-    await loadCurrentPatientId();
+  if(!currentUser) return;
+  if((S.role==='patient'||S.role==='family') && currentPatientId && !PATIENT_DATA){
     await loadPatientData();
   }
-  if(S.role==='family'){
-    await loadCurrentFamilyId();
-    await loadFamilyData();
-  }
-  if(S.role==='doctor' || S.role==='nurse'){
-    await loadCurrentPractitionerId();
-    await loadPractitionerData();
-  }
 }
 
-async function loadCurrentPatientId(){
-  if(S.currentPatientId) return S.currentPatientId;
-  if(S.phone){
-    const { data } = await sb.from('patients').select('id').eq('phone', S.phone).maybeSingle();
-    if(data?.id){ S.currentPatientId = data.id; return data.id; }
-  }
-  const { data } = await sb.from('patients').select('id').limit(1).maybeSingle();
-  if(data?.id){ S.currentPatientId = data.id; }
-  return S.currentPatientId;
-}
-
-async function loadCurrentPractitionerId(){
-  if(S.currentPractitionerId) return S.currentPractitionerId;
-  if(!S.phone) return null;
-  const table = S.role === 'nurse' ? 'nurses' : 'doctors';
-  const { data } = await sb.from(table).select('id').eq('phone', S.phone).maybeSingle();
-  if(data?.id){ S.currentPractitionerId = data.id; return data.id; }
-  const { data: first } = await sb.from(table).select('id').limit(1).maybeSingle();
-  if(first?.id){ S.currentPractitionerId = first.id; }
-  return S.currentPractitionerId;
-}
-
-async function loadCurrentFamilyId(){
-  if(S.currentFamilyId) return S.currentFamilyId;
-  if(S.phone){
-    const { data } = await sb.from('families').select('id').eq('phone', S.phone).maybeSingle();
-    if(data?.id){ S.currentFamilyId = data.id; return data.id; }
-  }
-  const { data } = await sb.from('families').select('id').limit(1).maybeSingle();
-  if(data?.id){ S.currentFamilyId = data.id; }
-  return S.currentFamilyId;
+function enrichPatientData(data){
+  const name = data.full_name || data.name || 'Patient';
+  return {
+    ...data,
+    name,
+    avatar: data.avatar || initials(name),
+    avatarColor: data.avatarColor || avColor(0),
+    conditions: data.conditions || [],
+    medications: currentMedications.length > 0
+      ? currentMedications.map((m,i)=>{
+          const prescribedTimes = (m.times||['Morning']).map(t=>t.toLowerCase());
+          const medId = m.medication_id||i;
+          const todayLogs = currentMedicationLogs.filter(l=>l.medication_id===medId);
+          const logStatus = slot => {
+            const l = todayLogs.find(l=>l.scheduled_time===slot);
+            return l ? l.status : (prescribedTimes.includes(slot) ? 'pending' : 'na');
+          };
+          return {
+            id: medId, name: m.medication_name||m.name,
+            generic: m.generic_name||'', freq: m.frequency||'OD',
+            times: m.times||['Morning'],
+            bg: ['#E8F5F2','#EFF6FF','#EDE9FE','#FEE2E2'][i%4],
+            color: ['#22C55E','#2563EB','#7C3AED','#EF4444'][i%4],
+            logs:{
+              morning: logStatus('morning'),
+              afternoon: logStatus('afternoon'),
+              evening: logStatus('evening'),
+              night: logStatus('night'),
+            }
+          };
+        })
+      : [],
+    adherenceWeek: data.adherenceWeek||[70,80,65,90,75,80,85],
+    recentCheckins: currentCheckins.length>0
+      ? currentCheckins.map(c=>({date:c.checkin_date,feeling:c.feeling_score||c.feeling||3,pain:c.pain_level||c.pain||3,symptoms:c.symptoms||[],note:c.notes||c.note||c.patient_notes||c.message||c.description||'',flag:(((c.feeling_score||c.feeling)||3)<=2||(c.symptoms||[]).some(s=>['Chest pain','Breathlessness'].includes(s)))||false}))
+      : [],
+    age: data.age||'', city: data.city||'',
+    hospital: data.hospital_name||data.hospitalName||data.hospital||'',
+    adherenceToday: 78,
+    followupDate: data.followup_date||'TBD',
+    lastCheckin: data.last_checkin_date||data.lastCheckin||'',
+    dischargeDate: data.discharge_date||new Date().toISOString(),
+    photo: data.photo||null,
+    doctor: data.doctor||null,
+  };
 }
 
 async function loadPatientData(patientId){
-  const id = patientId || S.currentPatientId || await loadCurrentPatientId();
+  const id = patientId || currentPatientId;
   if(!id){ PATIENT_DATA = null; return null; }
-  if(PATIENT_DATA?.id === id) return PATIENT_DATA;
+  if(PATIENT_DATA?.patient_id === id) return PATIENT_DATA;
   try{
-    const { data, error } = await sb.from('patients').select('*').eq('id', id).maybeSingle();
+    const { data, error } = await sb.from('patients').select('*').eq('patient_id', id).maybeSingle();
     if(error || !data) throw error || new Error('No patient');
-    if(data.doctor_id){
-      const { data: doc } = await sb.from('doctors').select('*').eq('id', data.doctor_id).maybeSingle();
-      if(doc) data.doctor = doc;
-    }
-    data.conditions = data.conditions || [];
-    data.medications = data.medications || [];
-    data.adherenceWeek = data.adherenceWeek || [];
-    data.recentCheckins = data.recentCheckins || [];
-    data.avatar = data.avatar || initials(data.name || '??');
-    data.avatarColor = data.avatarColor || avColor(0);
-    PATIENT_DATA = data;
+    PATIENT_DATA = enrichPatientData(data);
+    currentPatientData = PATIENT_DATA;
   } catch(err){
     console.warn('loadPatientData error', err);
     PATIENT_DATA = null;
@@ -504,97 +556,350 @@ async function loadPatientData(patientId){
 
 async function loadPractitionerData(){
   if(PRACTITIONER_DATA) return PRACTITIONER_DATA;
-  await loadCurrentPractitionerId();
-  if(!S.currentPractitionerId) return null;
-  const table = S.role === 'nurse' ? 'nurses' : 'doctors';
-  const { data } = await sb.from(table).select('*').eq('id', S.currentPractitionerId).maybeSingle();
-  PRACTITIONER_DATA = data || null;
+  if(!currentUser) return null;
+  PRACTITIONER_DATA = { name: currentUser.full_name||(S.role==='nurse'?'Nurse':'Doctor'), role: S.role, user_id: currentUser.user_id };
   return PRACTITIONER_DATA;
 }
 
 async function loadPractitionerPatients(){
   if(PATIENT_LIST) return PATIENT_LIST;
-  await loadPractitionerData();
-  if(!S.currentPractitionerId) return [];
-  const field = S.role === 'nurse' ? 'nurse_id' : 'doctor_id';
-  const { data } = await sb.from('patients').select('*').eq(field, S.currentPractitionerId);
-  PATIENT_LIST = data || [];
+  if(!currentUser?.user_id) return [];
+  const { data, error } = await sb.from('patients').select('*').eq('created_by', currentUser.user_id);
+  if(error){ console.warn('loadPractitionerPatients error', error); return []; }
+
+  const patientIds = (data||[]).map(p=>p.patient_id).filter(Boolean);
+  const today = new Date().toISOString().split('T')[0];
+  const weekAgo = new Date(Date.now()-7*864e5).toISOString().split('T')[0];
+
+  // Load real check-in and medication log data for all patients in parallel
+  const [checkinRes, logRes] = patientIds.length
+    ? await Promise.all([
+        sb.from('daily_checkins').select('*').in('patient_id',patientIds)
+          .gte('checkin_date',weekAgo).order('checkin_date',{ascending:false}),
+        sb.from('medication_logs').select('*').in('patient_id',patientIds)
+          .eq('log_date',today)
+      ])
+    : [{data:[]},{data:[]}];
+
+  const allCheckins = checkinRes.data||[];
+  const allLogs = logRes.data||[];
+
+  PATIENT_LIST = (data||[]).map((pt,i)=>{
+    const ptCheckins = allCheckins.filter(c=>c.patient_id===pt.patient_id);
+    const latestCheckin = ptCheckins[0]||null;
+    const ptLogs = allLogs.filter(l=>l.patient_id===pt.patient_id);
+    const confirmedLogs = ptLogs.filter(l=>l.status==='confirmed').length;
+    const missedLogs = ptLogs.filter(l=>l.status==='missed').length;
+    const totalLogs = ptLogs.length;
+    const adherence = totalLogs>0 ? Math.round(confirmedLogs/totalLogs*100) : null;
+    return {
+      ...pt,
+      id: pt.patient_id,
+      name: pt.full_name||pt.name||'Unknown',
+      status: pt.status||'green',
+      avatar: initials(pt.full_name||pt.name||'UN'),
+      conditions: pt.conditions||[],
+      daysSince: pt.discharge_date
+        ? Math.floor((Date.now()-new Date(pt.discharge_date).getTime())/(1000*60*60*24))
+        : 0,
+      lastCheckin: latestCheckin?.checkin_date || pt.last_checkin_date || 'No check-in yet',
+      condition: (pt.conditions||[]).join(' · '),
+      latestCheckin,
+      adherence,
+      confirmedLogs,
+      missedLogs,
+      totalLogs,
+    };
+  });
   return PATIENT_LIST;
+}
+
+async function loadFamilyPatient(){
+  if(!currentPatientId) return null;
+  return loadPatientData(currentPatientId);
 }
 
 async function loadFamilyData(){
   if(FAMILY_DATA) return FAMILY_DATA;
-  await loadCurrentFamilyId();
-  if(!S.currentFamilyId) return null;
-  const { data } = await sb.from('families').select('*').eq('id', S.currentFamilyId).maybeSingle();
-  FAMILY_DATA = data || null;
+  if(currentUser) FAMILY_DATA = { name: currentUser.full_name||currentUser.email||'Family', id: currentUser.user_id };
   return FAMILY_DATA;
-}
-
-async function loadFamilyPatient(){
-  const family = await loadFamilyData();
-  if(!family) return null;
-  if(family.patient_id){
-    return loadPatientData(family.patient_id);
-  }
-  const { data } = await sb.from('patients').select('*').eq('family_id', family.id).limit(1).maybeSingle();
-  if(data) return loadPatientData(data.id);
-  return null;
 }
 
 async function updatePatientRecord(updates){
   const patient = await loadPatientData();
-  if(!patient?.id) return null;
-  const { data, error } = await sb.from('patients').update(updates).eq('id', patient.id).select().maybeSingle();
-  if(error){
-    console.warn('updatePatientRecord error', error);
-    return patient;
-  }
-  PATIENT_DATA = {...patient, ...data};
+  if(!patient?.patient_id) return null;
+  const { data, error } = await sb.from('patients').update(updates).eq('patient_id', patient.patient_id).select().maybeSingle();
+  if(error){ console.warn('updatePatientRecord error', error); return patient; }
+  PATIENT_DATA = enrichPatientData({...patient, ...data});
+  currentPatientData = PATIENT_DATA;
   return PATIENT_DATA;
 }
 
-async function getOrCreateDoctor(doctorName, doctorPhone){
-  if(!doctorName && !doctorPhone) return null;
-  const query = sb.from('doctors').select('*');
-  const where = doctorPhone ? { phone: doctorPhone } : { name: doctorName };
-  const { data } = await query.match(where).maybeSingle();
-  if(data) return data;
-  const { data: created } = await sb.from('doctors').insert([{ name: doctorName, phone: doctorPhone }]).select().maybeSingle();
-  return created || null;
+async function selectPatient(patientId){
+  currentPatientId = patientId;
+  PATIENT_DATA = null;
+  currentPatientData = null;
+  currentMedications = [];
+  currentMedicationLogs = [];
+  currentCheckins = [];
+  await loadAllPatientData();
+  nav('carepath', 'patientDetail');
 }
 
-async function selectPatient(patientId){
-  S.currentPatientId = patientId;
-  PATIENT_DATA = null;
-  await loadPatientData(patientId);
+function addPatientForPractitioner(){
+  S.showAddPatientModal = true;
+  S.addPatientStep = 0;
+  S.newPrescriptions = [];
   render();
 }
 
-async function addPatientForPractitioner(){
-  const name = prompt('Patient name');
-  if(!name) return;
-  const phone = prompt('Patient phone');
-  const { data, error } = await sb.from('patients').insert([{ name, phone, doctor_id: S.currentPractitionerId }]).select().maybeSingle();
-  if(error){ alert('Unable to add patient'); console.warn(error); return; }
+function hideAddPatientModal(){
+  S.showAddPatientModal = false;
+  S.addPatientStep = 0;
+  S.newPrescriptions = [];
+  render();
+}
+
+function goToAddPrescriptionStep(){
+  const name = document.getElementById('newPatName')?.value?.trim();
+  const email = document.getElementById('newPatEmail')?.value?.trim().toLowerCase();
+  if(!name || !email || !email.includes('@') || !email.includes('.')){
+    alert('Please enter a valid name and email address.');
+    return;
+  }
+  S.addPatientStep = 1;
+  if(!S.newPrescriptions.length) S.newPrescriptions = [{name:'',times:[]}];
+  render();
+}
+
+function addPrescriptionRow(){
+  document.querySelectorAll('.rx-name-inp').forEach((inp,i)=>{
+    if(S.newPrescriptions[i]) S.newPrescriptions[i].name = inp.value;
+  });
+  S.newPrescriptions.push({name:'',times:[]});
+  render();
+}
+
+function removePrescriptionRow(i){
+  document.querySelectorAll('.rx-name-inp').forEach((inp,j)=>{
+    if(S.newPrescriptions[j]) S.newPrescriptions[j].name = inp.value;
+  });
+  S.newPrescriptions.splice(i,1);
+  render();
+}
+
+function toggleRxTime(i,slot,checked){
+  if(!S.newPrescriptions[i]) return;
+  if(!S.newPrescriptions[i].times) S.newPrescriptions[i].times=[];
+  if(checked && !S.newPrescriptions[i].times.includes(slot)) S.newPrescriptions[i].times.push(slot);
+  if(!checked) S.newPrescriptions[i].times = S.newPrescriptions[i].times.filter(t=>t!==slot);
+}
+
+async function selectDoctorPatient(patient){
+  S.selectedDoctorPatient = patient;
+  currentPatientId = patient.id || patient.patient_id;
+  PATIENT_DATA = null; currentMedications = []; currentMedicationLogs = []; currentCheckins = [];
+  await loadAllPatientData();
+  render();
+}
+
+function clearDoctorPatient(){
+  S.selectedDoctorPatient = null;
+  render();
+}
+
+function showMedHistory(medId){
+  S.showMedHistoryId = medId;
+  render();
+}
+function closeMedHistory(){
+  S.showMedHistoryId = null;
+  render();
+}
+
+async function handleAddPatient(){
+  // Collect current input values (may be on step 2)
+  const storedName = document.querySelector('[data-field="patName"]')?.value?.trim() ||
+    document.getElementById('newPatName')?.value?.trim();
+  const storedEmail = document.querySelector('[data-field="patEmail"]')?.value?.trim().toLowerCase() ||
+    document.getElementById('newPatEmail')?.value?.trim().toLowerCase();
+  // Read prescription names from visible inputs
+  document.querySelectorAll('.rx-name-inp').forEach((inp,i)=>{
+    if(S.newPrescriptions[i]) S.newPrescriptions[i].name = inp.value.trim();
+  });
+  const name = S._pendingPatName || storedName;
+  const email = S._pendingPatEmail || storedEmail;
+  const familyEmail = (S._pendingFamilyEmail || '').trim().toLowerCase();
+  const condition = S._pendingCondition || '';
+  const prescriptions = (S.newPrescriptions||[]).filter(rx=>rx.name?.trim());
+
+  if(!name || !email || !email.includes('@') || !email.includes('.')){
+    alert('Please enter a valid name and email address.'); return;
+  }
+  if(!currentUser?.user_id){ alert('Session expired.'); return; }
+  const btn = document.getElementById('addPatBtn');
+  if(btn){ btn.textContent='Saving...'; btn.disabled=true; }
+
+  const { data: existingPat } = await sb.from('patients')
+    .select('patient_id').eq('email', email).eq('created_by', currentUser.user_id).maybeSingle();
+  if(existingPat){
+    alert(`A patient with email ${email} already exists.`);
+    if(btn){ btn.textContent='Save Patient & Activate'; btn.disabled=false; }
+    return;
+  }
+
+  const newPatientId = crypto.randomUUID();
+  const conditions = condition ? condition.split(',').map(s=>s.trim()).filter(Boolean) : [];
+  const { error: pe } = await sb.from('patients').insert({
+    patient_id: newPatientId, full_name: name, email, created_by: currentUser.user_id,
+    conditions, discharge_date: new Date().toISOString().split('T')[0],
+  });
+  if(pe){ alert('Error: '+pe.message); if(btn){ btn.textContent='Save Patient & Activate'; btn.disabled=false; } return; }
+
+  const { data: existingUser } = await sb.from('users').select('user_id').eq('email',email).eq('role','patient').maybeSingle();
+  if(existingUser){
+    await sb.from('users').update({linked_patient_id:newPatientId,full_name:name}).eq('user_id',existingUser.user_id);
+  } else {
+    const { error: ue } = await sb.from('users').insert({
+      user_id: crypto.randomUUID(), email, full_name: name, role:'patient',
+      linked_patient_id: newPatientId, is_verified:false, is_active:true
+    });
+    if(ue) console.warn('User insert:', ue.message);
+  }
+
+  // Create family user if email provided
+  if(familyEmail && familyEmail.includes('@')){
+    const familyUserId = crypto.randomUUID();
+    const { data: ef } = await sb.from('users').select('user_id').eq('email',familyEmail).eq('role','family').maybeSingle();
+    if(!ef){
+      await sb.from('users').insert({
+        user_id: familyUserId, email: familyEmail, full_name:'Family Member', role:'family',
+        linked_patient_id: newPatientId, is_verified:false, is_active:true
+      }).catch(()=>{});
+      await sb.from('patient_family_links').insert({
+        patient_id: newPatientId, family_user_id: familyUserId, relationship:'family', is_primary_contact:true
+      }).catch(()=>{});
+    }
+  }
+
+  // Save prescriptions
+  const rxErrors = [];
+  for(const rx of prescriptions){
+    const times = (rx.times||[]).map(t=>t.charAt(0).toUpperCase()+t.slice(1));
+    const freq = times.length>=3?'TDS':times.length===2?'BD':'OD';
+    const { error: rxErr } = await sb.from('medications').insert({
+      medication_id: crypto.randomUUID(), patient_id: newPatientId,
+      medication_name: rx.name, frequency: freq, times, is_active: true
+    });
+    if(rxErr) rxErrors.push(`${rx.name}: ${rxErr.message}`);
+  }
+  if(rxErrors.length) console.warn('Prescription save errors:', rxErrors);
+
   PATIENT_LIST = null;
   await loadPractitionerPatients();
-  if(data?.id){
-    S.currentPatientId = data.id;
-    PATIENT_DATA = data;
-  }
+  S.showAddPatientModal = false; S.addPatientStep = 0; S.newPrescriptions = [];
+  S._pendingPatName=''; S._pendingPatEmail=''; S._pendingFamilyEmail=''; S._pendingCondition='';
+  const rxMsg = rxErrors.length
+    ? `\n⚠️ ${rxErrors.length} prescription(s) failed to save:\n${rxErrors.join('\n')}`
+    : prescriptions.length ? `\n${prescriptions.length} prescription(s) saved.` : '';
+  alert(`✅ Patient "${name}" added!${rxMsg}\nThey can log in with ${email}.`);
   render();
 }
 
-async function addFamilyMember(patientId){
-  const name = prompt('Family member name');
-  if(!name) return;
-  const phone = prompt('Family member phone');
-  const { data, error } = await sb.from('families').insert([{ name, phone, patient_id: patientId }]).select().maybeSingle();
-  if(error){ alert('Unable to add family member'); console.warn(error); return; }
-  FAMILY_DATA = null;
-  await loadFamilyData();
+async function editPatient(patientId, currentName, currentEmail){
+  const name = prompt('Edit patient name:', currentName);
+  if(name===null) return;
+  const email = prompt('Edit patient email:', currentEmail);
+  if(email===null) return;
+  if(!name.trim()||!email.includes('@')){ alert('Invalid name or email.'); return; }
+  const { error } = await sb.from('patients').update({ full_name: name.trim(), email: email.trim().toLowerCase() }).eq('patient_id', patientId);
+  if(error){ alert('Error: '+error.message); return; }
+  await sb.from('users').update({ full_name: name.trim(), email: email.trim().toLowerCase() }).eq('linked_patient_id', patientId);
+  PATIENT_LIST = null;
+  await loadPractitionerPatients();
   render();
+}
+
+async function deletePatient(patientId, name){
+  if(!confirm(`Delete patient "${name}"?\n\nThis removes their profile and all associated data. This cannot be undone.`)) return;
+  await sb.from('users').delete().eq('linked_patient_id', patientId);
+  const { error } = await sb.from('patients').delete().eq('patient_id', patientId);
+  if(error){ alert('Error: '+error.message); return; }
+  if(currentPatientId === patientId){ currentPatientId=null; PATIENT_DATA=null; currentPatientData=null; }
+  PATIENT_LIST = null;
+  await loadPractitionerPatients();
+  render();
+}
+
+function renderAddPatientModal(){
+  if(!S.showAddPatientModal) return '';
+  const step = S.addPatientStep||0;
+  const rxRows = (S.newPrescriptions||[]).map((rx,i)=>`
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:12px;margin-bottom:10px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div style="font-size:13px;font-weight:700;color:var(--text)">Medicine ${i+1}</div>
+        <button onclick="removePrescriptionRow(${i})" style="background:var(--danger-l);border:none;border-radius:6px;padding:3px 8px;cursor:pointer;color:var(--danger);font-size:11px;font-weight:700">✕ Remove</button>
+      </div>
+      <input class="form-input rx-name-inp" placeholder="e.g. Metformin 500mg" value="${rx.name||''}" style="margin-bottom:8px">
+      <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:6px">Schedule:</div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap">
+        ${[['morning','🌅 Morning'],['afternoon','☀️ Afternoon'],['night','🌙 Night']].map(([slot,label])=>`
+          <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:13px;font-weight:600">
+            <input type="checkbox" ${(rx.times||[]).includes(slot)?'checked':''} onchange="toggleRxTime(${i},'${slot}',this.checked)" style="width:16px;height:16px;accent-color:var(--primary)">
+            ${label}
+          </label>`).join('')}
+      </div>
+    </div>`).join('');
+
+  return `<div style="position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:200;display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this)hideAddPatientModal()">
+    <div style="background:#fff;border-radius:24px 24px 0 0;padding:28px 20px 40px;width:100%;max-width:430px;animation:fadeUp .25s ease;max-height:90vh;overflow-y:auto">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+        <div style="font-size:18px;font-weight:700">${step===0?'Add New Patient':'Add Prescriptions'}</div>
+        <button onclick="hideAddPatientModal()" style="background:var(--bg);border:none;border-radius:50%;width:32px;height:32px;cursor:pointer;display:flex;align-items:center;justify-content:center">${I.x}</button>
+      </div>
+      <div style="display:flex;gap:6px;margin-bottom:18px">
+        <div style="flex:1;height:4px;border-radius:2px;background:var(--primary)"></div>
+        <div style="flex:1;height:4px;border-radius:2px;background:${step===1?'var(--primary)':'var(--border2)'}"></div>
+      </div>
+      ${step===0?`
+        <div style="font-size:11px;font-weight:700;color:var(--text3);margin-bottom:14px;font-family:'Outfit',sans-serif;letter-spacing:.05em">STEP 1 OF 2 — PATIENT DETAILS</div>
+        <div class="form-group">
+          <label class="form-label">Patient Full Name <span style="color:var(--danger)">*</span></label>
+          <input id="newPatName" class="form-input" placeholder="e.g. Ramabai Kulkarni" type="text" value="${S._pendingPatName||''}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Patient Email <span style="color:var(--danger)">*</span></label>
+          <input id="newPatEmail" class="form-input" placeholder="patient@email.com" type="email" value="${S._pendingPatEmail||''}">
+          <div style="font-size:12px;color:var(--text3);margin-top:5px">Patient uses this to log in and see their health data</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Family Member Email <span style="font-weight:400;color:var(--text3)">(optional)</span></label>
+          <input id="newFamilyEmail" class="form-input" placeholder="family@email.com" type="email" value="${S._pendingFamilyEmail||''}">
+          <div style="font-size:12px;color:var(--text3);margin-top:5px">Same email as patient = role selector on login. Different = separate family login.</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Diagnosis / Condition <span style="font-weight:400;color:var(--text3)">(optional)</span></label>
+          <input id="newPatCondition" class="form-input" placeholder="e.g. Type 2 Diabetes, Hypertension" value="${S._pendingCondition||''}">
+        </div>
+        <button class="btn btn-primary" onclick="
+          S._pendingPatName=document.getElementById('newPatName').value;
+          S._pendingPatEmail=document.getElementById('newPatEmail').value;
+          S._pendingFamilyEmail=document.getElementById('newFamilyEmail').value;
+          S._pendingCondition=document.getElementById('newPatCondition').value;
+          goToAddPrescriptionStep()">Next: Add Prescriptions →</button>
+        <button onclick="hideAddPatientModal()" class="btn btn-ghost" style="margin-top:10px">Cancel</button>
+      `:`
+        <div style="font-size:11px;font-weight:700;color:var(--text3);margin-bottom:6px;font-family:'Outfit',sans-serif;letter-spacing:.05em">STEP 2 OF 2 — MEDICATION SCHEDULE (OPTIONAL)</div>
+        <div style="font-size:13px;color:var(--text2);margin-bottom:14px">Add medicines with morning / afternoon / night timing. You can also add more later.</div>
+        ${rxRows||'<div style="text-align:center;padding:14px;color:var(--text3);font-size:13px">No medicines added yet</div>'}
+        <button onclick="addPrescriptionRow()" class="btn btn-outline" style="margin-bottom:14px;display:flex;align-items:center;justify-content:center;gap:6px">
+          ${I.plus.replace('stroke="currentColor"','stroke="var(--primary)"')} Add Medicine
+        </button>
+        <button id="addPatBtn" class="btn btn-primary" onclick="handleAddPatient()">✓ Save Patient & Activate</button>
+        <button onclick="S.addPatientStep=0;render()" class="btn btn-ghost" style="margin-top:10px">← Back to Patient Info</button>
+      `}
+    </div>
+  </div>`;
 }
 
 function t(key, ...args){
@@ -635,33 +940,21 @@ async function saveProfileChanges(){
   const city = document.getElementById('profileCity')?.value.trim() || p.city;
   const conditions = document.getElementById('profileConditions')?.value || (p.conditions||[]).join(', ');
   const hospital = document.getElementById('profileHospital')?.value.trim() || p.hospitalName || p.hospital || '';
-  const doctorName = document.getElementById('profileDoctorName')?.value.trim() || (p.doctor?.name || '');
-  const doctorPhone = document.getElementById('profileDoctorPhone')?.value.trim() || (p.doctor?.phone || '');
 
   const reminderInputs = document.querySelectorAll('.reminderTimeInput');
   const reminderTimes = Array.from(reminderInputs)
-    .map(input => input.value)
-    .filter(time => time.trim() !== '')
-    .sort();
+    .map(input => input.value).filter(time => time.trim() !== '').sort();
 
-  const doctor = await getOrCreateDoctor(doctorName, doctorPhone);
   const updates = {
-    name,
+    full_name: name,
     age,
     city,
-    conditions: conditions.split(',').map(s => s.trim()).filter(Boolean),
-    hospitalName: hospital,
+    hospital_name: hospital,
   };
-  if(doctor?.id) updates.doctor_id = doctor.id;
 
   await updatePatientRecord(updates);
-  if(doctor?.id){
-    PATIENT_DATA.doctor = doctor;
-    PATIENT_DATA.doctor_id = doctor.id;
-  }
   S.reminderTimes = reminderTimes;
   S.reminderTime = reminderTimes.length > 0 ? reminderTimes[0] : '';
-
   if(reminderTimes.length > 0) scheduleReminders();
   alert(t('profile_saved'));
   nav('modules');
@@ -725,7 +1018,13 @@ function scheduleReminder(){
 
 async function renderProfileEditor(){
   const p = await loadPatientData();
-  const doctorInfo = typeof p?.doctor === 'object' ? p.doctor : { name: p?.doctor || '', phone: '' };
+  if(!p) return `<div class="screen" style="min-height:100vh;background:var(--bg)">
+    <div class="topbar"><button class="topbar-back" onclick="back()">${I.back}</button><div class="topbar-title">${t('profile_heading')}</div></div>
+    <div style="padding:32px 20px;text-align:center">
+      <div style="font-size:14px;color:var(--text2)">No patient profile found. Ask your doctor to add you to CareConnect first.</div>
+      <button class="btn btn-primary" style="margin-top:20px" onclick="nav('modules')">Back to Home</button>
+    </div>
+  </div>`;
   const reminderTimesHtml = S.reminderTimes.map((time, idx) => `
     <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
       <input type="time" class="form-input reminderTimeInput" data-idx="${idx}" value="${time}" style="flex:1">
@@ -734,7 +1033,7 @@ async function renderProfileEditor(){
       </button>
     </div>
   `).join('');
-  
+
   return `<div class="screen" style="min-height:100vh;background:var(--bg);padding-bottom:24px">
     <div class="topbar">
       <button class="topbar-back" onclick="back()">${I.back}</button>
@@ -744,13 +1043,10 @@ async function renderProfileEditor(){
       <div class="profile-top">
         ${p.photo
           ? `<img class="profile-photo" src="${p.photo}" alt="${p.name}">`
-          : `<div class="profile-avatar-large" style="background:${p.avatarColor}">${p.avatar}</div>`}
+          : `<div class="profile-avatar-large" style="background:${p.avatarColor||'#0B7A63'}">${p.avatar||'👤'}</div>`}
         <div style="flex:1">
           <div class="profile-name">${p.name}</div>
-          <div class="profile-meta">${p.city} · ${p.age} yrs</div>
-          <div style="font-size:13px;color:var(--text2);margin-top:8px">
-            ${doctorInfo.name} · ${doctorInfo.phone}
-          </div>
+          <div class="profile-meta">${p.city||'—'} · ${p.age||'—'} yrs</div>
           <label class="btn btn-outline" style="margin-top:10px;cursor:pointer;display:inline-flex;align-items:center;gap:8px">
             ${t('upload_photo')}
             <input type="file" accept="image/*" onchange="handlePhotoUpload(this)" style="display:none">
@@ -760,38 +1056,25 @@ async function renderProfileEditor(){
       <div class="form-section">
         <div class="form-group">
           <label class="form-label">${t('name_label')}</label>
-          <input id="profileName" class="form-input" value="${p.name}">
+          <input id="profileName" class="form-input" value="${p.name||''}">
         </div>
         <div class="form-row">
           <div class="form-group">
             <label class="form-label">${t('age_label')}</label>
-            <input id="profileAge" class="form-input" value="${p.age}">
+            <input id="profileAge" class="form-input" value="${p.age||''}">
           </div>
           <div class="form-group">
             <label class="form-label">${t('city_label')}</label>
-            <input id="profileCity" class="form-input" value="${p.city}">
+            <input id="profileCity" class="form-input" value="${p.city||''}">
           </div>
         </div>
         <div class="form-group">
           <label class="form-label">${t('disease_label')}</label>
-          <input id="profileConditions" class="form-input" value="${p.conditions.join(', ')}">
+          <input id="profileConditions" class="form-input" value="${(p.conditions||[]).join(', ')}">
         </div>
         <div class="form-group">
           <label class="form-label">${t('hospital_name')}</label>
-          <input id="profileHospital" class="form-input" placeholder="${t('hospital_help')}" value="${p.hospitalName||p.hospital||''}">
-        </div>
-        <div class="form-group">
-          <label class="form-label" style="margin-bottom:12px;font-weight:700">👨‍⚕️ Doctor Information</label>
-          <div class="form-row">
-            <div class="form-group" style="margin-bottom:0">
-              <label class="form-label">${t('doctor_name')}</label>
-              <input id="profileDoctorName" class="form-input" placeholder="Dr. Name" value="${doctorInfo.name||''}">
-            </div>
-            <div class="form-group" style="margin-bottom:0">
-              <label class="form-label">${t('doctor_phone')}</label>
-              <input id="profileDoctorPhone" class="form-input" placeholder="+91 XXXXXXXXXX" value="${doctorInfo.phone||''}">
-            </div>
-          </div>
+          <input id="profileHospital" class="form-input" placeholder="${t('hospital_help')}" value="${p.hospital_name||p.hospitalName||p.hospital||''}">
         </div>
         <div class="form-group">
           <label class="form-label">${t('reminder_time')} (${S.reminderTimes.length})</label>
@@ -1379,14 +1662,38 @@ function renderNoProfile() {
 }
 
 async function detectRolesAndRoute(authUser) {
+  S.email = authUser.email;
   const roles = await getRolesForEmail(authUser.email);
 
   if (!roles || roles.length === 0) {
     if (S.userTypeHint === 'clinical') {
-      await registerNewDoctor(authUser.email);
+      await registerNewDoctor(authUser);
     } else {
-      S.email = authUser.email;
-      nav('noProfile');
+      // Check if doctor has already added this email to patients table
+      const { data: patient } = await sb
+        .from('patients').select('patient_id').eq('email', authUser.email).maybeSingle();
+      if (patient?.patient_id) {
+        // Auto-create user record and log them in as patient
+        await sb.from('users').insert({
+          user_id: authUser.id || crypto.randomUUID(),
+          email: authUser.email,
+          full_name: authUser.email.split('@')[0],
+          role: 'patient',
+          linked_patient_id: patient.patient_id,
+          is_verified: true,
+          is_active: true
+        });
+        const roles2 = await getRolesForEmail(authUser.email);
+        if (roles2?.length > 0) { await applyRole(roles2[0]); return; }
+      }
+      // No profile found — let them in with a nudge banner
+      currentUser = { email: authUser.email, role: 'patient', user_id: authUser.id };
+      S.role = 'patient';
+      S.noProfileNudge = true;
+      currentPatientId = null;
+      currentPatientData = null;
+      PATIENT_DATA = null;
+      nav('modules');
     }
     return;
   }
@@ -1399,33 +1706,25 @@ async function detectRolesAndRoute(authUser) {
   }
 }
 
-async function registerNewDoctor(email) {
-  const newUserId = crypto.randomUUID();
+async function registerNewDoctor(authUser) {
+  const email = authUser.email;
+  const userId = authUser.id || crypto.randomUUID();
   const name = email.split('@')[0]
     .replace(/[._]/g, ' ')
     .replace(/\b\w/g, l => l.toUpperCase());
 
-  const { data: existing, error: existingError } = await sb
-    .from('users')
-    .select('user_id')
-    .eq('email', email)
-    .maybeSingle();
-
-  if (existingError) {
-    console.error('registerNewDoctor existing lookup failed:', existingError);
-  }
+  const { data: existing } = await sb
+    .from('users').select('user_id').eq('email', email).maybeSingle();
 
   if (existing) {
     const roles = await getRolesForEmail(email);
-    if (roles && roles.length > 0) {
-      await applyRole(roles[0]);
-    }
+    if (roles && roles.length > 0) await applyRole(roles[0]);
     return;
   }
 
-  const { error } = await sb.from('users').insert({
-    user_id: newUserId,
-    email: email,
+  let { error } = await sb.from('users').insert({
+    user_id: userId,
+    email,
     full_name: 'Dr. ' + name,
     role: 'doctor',
     is_verified: true,
@@ -1433,37 +1732,49 @@ async function registerNewDoctor(email) {
   });
 
   if (error) {
-    alert('Could not create profile: ' + error.message);
-    return;
+    // Fallback with fresh UUID if auth ID conflicts with DB constraint
+    const { error: e2 } = await sb.from('users').insert({
+      user_id: crypto.randomUUID(),
+      email,
+      full_name: 'Dr. ' + name,
+      role: 'doctor',
+      is_verified: true,
+      is_active: true
+    });
+    if (e2) { alert('Could not create doctor profile: ' + e2.message); return; }
   }
 
   const roles = await getRolesForEmail(email);
-  if (roles && roles.length > 0) {
-    await applyRole(roles[0]);
-  }
+  if (roles && roles.length > 0) await applyRole(roles[0]);
 }
 
 async function applyRole(roleRow) {
   currentUser = roleRow;
   S.role = roleRow.role;
+  S.noProfileNudge = false;
+  PATIENT_DATA = null;
+  PATIENT_LIST = null;
+  PRACTITIONER_DATA = null;
+  FAMILY_DATA = null;
 
   if (roleRow.role === 'patient') {
-    currentPatientId = roleRow.linked_patient_id;
+    currentPatientId = roleRow.linked_patient_id || null;
     if (!currentPatientId && roleRow.email) {
       const { data: patient } = await sb
-        .from('patients')
-        .select('patient_id')
-        .eq('email', roleRow.email)
-        .maybeSingle();
+        .from('patients').select('patient_id').eq('email', roleRow.email).maybeSingle();
       currentPatientId = patient?.patient_id || null;
     }
+    if (!currentPatientId) S.noProfileNudge = true;
   } else if (roleRow.role === 'family') {
     const { data: link } = await sb
-      .from('patient_family_links')
-      .select('patient_id')
-      .eq('family_user_id', roleRow.user_id)
-      .maybeSingle();
+      .from('patient_family_links').select('patient_id').eq('family_user_id', roleRow.user_id).maybeSingle();
     currentPatientId = link?.patient_id || null;
+    if (!currentPatientId && roleRow.email) {
+      // Also check if patient was linked by email in patients table
+      const { data: pt } = await sb.from('patients').select('patient_id').eq('family_email', roleRow.email).maybeSingle();
+      currentPatientId = pt?.patient_id || null;
+    }
+    if (!currentPatientId) S.noProfileNudge = true;
   } else if (roleRow.role === 'doctor' || roleRow.role === 'nurse') {
     currentPatientId = null;
   }
@@ -1481,31 +1792,21 @@ async function loadAllPatientData() {
   const today = new Date().toISOString().split('T')[0];
 
   const [patientRes, medRes, logRes, checkinRes] = await Promise.all([
-    sb.from('patients')
-      .select('*')
-      .eq('patient_id', currentPatientId)
-      .single(),
-    sb.from('medications')
-      .select('*')
-      .eq('patient_id', currentPatientId)
-      .eq('is_active', true),
-    sb.from('medication_logs')
-      .select('*')
-      .eq('patient_id', currentPatientId)
-      .gte('scheduled_time', today)
-      .order('scheduled_time', { ascending: true }),
-    sb.from('daily_checkins')
-      .select('*')
-      .eq('patient_id', currentPatientId)
-      .order('checkin_date', { ascending: false })
-      .limit(7)
+    sb.from('patients').select('*').eq('patient_id', currentPatientId).maybeSingle(),
+    sb.from('medications').select('*').eq('patient_id', currentPatientId).eq('is_active', true),
+    sb.from('medication_logs').select('*').eq('patient_id', currentPatientId)
+      .eq('log_date', today)
+      .then(r => r).catch(() => ({data: [], error: null})),
+    sb.from('daily_checkins').select('*').eq('patient_id', currentPatientId)
+      .order('checkin_date', { ascending: false }).limit(7)
+      .then(r => r).catch(() => ({data: [], error: null})),
   ]);
 
-  currentPatientData = patientRes.data;
   currentMedications = medRes.data || [];
   currentMedicationLogs = logRes.data || [];
   currentCheckins = checkinRes.data || [];
-  PATIENT_DATA = currentPatientData;
+  currentPatientData = patientRes.data || null;
+  PATIENT_DATA = currentPatientData ? enrichPatientData(currentPatientData) : null;
 }
 
 // ── ROLE SELECT ──
@@ -1593,33 +1894,36 @@ function renderModules(){
       <div class="hero-greeting">${t('good_morning')}</div>
       <div class="hero-name">${rn}</div>
       <div class="hero-role-badge">
-        ${rl} · ${profilePersona.hospitalName||profilePersona.hospital||''}
+        ${rl} · ${profilePersona.hospitalName||profilePersona.hospital||'CareConnect'}
       </div>
+      ${(S.role==='patient'||S.role==='family') ? `
+      <button type="button" onclick="nav('profile')" style="display:inline-flex;align-items:center;gap:6px;margin-top:12px;padding:7px 14px;border:1.5px solid rgba(255,255,255,.5);border-radius:20px;background:rgba(255,255,255,.15);cursor:pointer;color:#fff;font-size:12px;font-weight:700;font-family:'Outfit',sans-serif;backdrop-filter:blur(6px)">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5Z"/></svg>
+        ${t('edit_profile')}
+      </button>` : ''}
       <div style="position:absolute;top:14px;right:16px;display:flex;flex-direction:column;gap:10px;align-items:flex-end;z-index:50">
         <select onchange="setLanguage(this.value)" style="background:#fff;color:#0B7A63;border:1.5px solid rgba(255,255,255,.95);border-radius:10px;padding:8px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:'Outfit',sans-serif;min-width:130px;z-index:51;margin-bottom:6px">
           ${Object.entries(LANG_LABELS).map(([code,label])=>`<option value="${code}" ${S.language===code?'selected':''}>${label}</option>`).join('')}
         </select>
-        <button type="button" onclick="handleLogout()" style="display:flex;align-items:center;gap:6px;padding:10px 14px;border:none;border-radius:14px;background:rgba(255,255,255,.15);color:#fff;cursor:pointer;font-family:'Outfit',sans-serif;min-width:120px;z-index:52;box-shadow:0 10px 30px rgba(0,0,0,.12)">
-          Sign out
-        </button>
-        <button type="button" onclick="nav('profile')" style="display:flex;flex-direction:column;align-items:center;gap:6px;padding:10px 14px;border:none;border-radius:14px;background:rgba(255,255,255,.12);cursor:pointer;transition:.2s;color:#fff;font-family:'Outfit',sans-serif;min-width:120px;z-index:52;box-shadow:0 10px 30px rgba(0,0,0,.12)">
-          <div class="topbar-avatar" style="background:${profilePersona.avatarColor};overflow:hidden;padding:0;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;min-width:48px;min-height:48px;">
-            ${profilePersona.photo ? `<img src="${profilePersona.photo}" alt="${profilePersona.name}" style="width:100%;height:100%;object-fit:cover">` : profilePersona.avatar}
-          </div>
-          <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:rgba(255,255,255,.95);font-weight:700">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5Z"/></svg>
-            ${t('edit_label')}
-          </div>
-        </button>
       </div>
-      ${S.role==='doctor' || S.role==='nurse' ? `<div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
-        <button class="btn btn-sm" style="background:${S.activeProfile==='patient'?'#0B7A63':'transparent'}; color:${S.activeProfile==='patient'?'#fff':'var(--text)'}; border:1.5px solid ${S.activeProfile==='patient'?'#0B7A63':'var(--border2)'}" onclick="setProfileView('patient')">Patient / Caretaker</button>
-        <button class="btn btn-sm" style="background:${S.activeProfile==='family'?'#2563EB':'transparent'}; color:${S.activeProfile==='family'?'#fff':'var(--text)'}; border:1.5px solid ${S.activeProfile==='family'?'#2563EB':'var(--border2)'}" onclick="setProfileView('family')">Family Member</button>
-      </div>`:''}
+      ${(S.role==='doctor'||S.role==='nurse') ? `
+      <div style="margin-top:14px">
+        <button onclick="addPatientForPractitioner()" style="width:100%;padding:13px 18px;border:none;border-radius:14px;background:#fff;color:#0B7A63;font-weight:700;font-size:15px;cursor:pointer;font-family:'Outfit',sans-serif;display:flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 4px 14px rgba(0,0,0,.15)">
+          ${I.plus.replace('stroke="currentColor"','stroke="#0B7A63"')} Add New Patient
+        </button>
+      </div>` : ''}
     </div>
+    ${S.noProfileNudge ? `
+    <div style="margin:16px 16px 0;padding:16px 18px;background:#FEF3C7;border:1.5px solid #FCD34D;border-radius:16px;display:flex;gap:12px;align-items:flex-start">
+      <div style="font-size:22px;flex-shrink:0">👋</div>
+      <div>
+        <div style="font-size:15px;font-weight:700;color:#92400E;margin-bottom:4px">Ask your doctor to add your profile</div>
+        <div style="font-size:13px;color:#92400E;line-height:1.5">Your doctor needs to register your email <strong>${S.email}</strong> in CareConnect. Once they do, your full health profile, medicines, and daily check-ins will load automatically here.</div>
+      </div>
+    </div>` : ''}
     <div style="padding:6px 16px 0;display:flex;justify-content:space-between;align-items:center">
       <div style="font-size:13px;font-weight:700;color:var(--text2);padding-top:14px">${t('choose_module')}</div>
-      ${S.role==='family'?`<div style="margin-top:14px;position:relative;cursor:pointer" onclick="alert('2 new alerts: Atorvastatin missed last night + Suresh Mehta check-in overdue')">
+      ${S.role==='family'?`<div style="margin-top:14px;position:relative;cursor:pointer" onclick="alert('2 new alerts: Atorvastatin missed last night + check-in overdue')">
         ${I.bell.replace('stroke="currentColor"','stroke="var(--text2)"')}
         <div style="position:absolute;top:-2px;right:-4px;width:16px;height:16px;background:var(--danger);border-radius:50%;font-size:10px;font-weight:700;color:#fff;display:flex;align-items:center;justify-content:center;font-family:'Outfit',sans-serif">${S.notifCount}</div>
       </div>`:''}
@@ -1636,6 +1940,7 @@ function renderModules(){
     <div style="padding:8px 16px 24px;text-align:center;font-size:12px;color:var(--text3)">
       EthAum Healthcare Hackathon 2025 · CareConnect MVP v1.0
     </div>
+    ${renderAddPatientModal()}
   </div>`;
 }
 
@@ -1661,54 +1966,167 @@ function renderCarePath(){
   return renderCarePathPatient();
 }
 
+async function renderPatientDetail(){
+  const p = PATIENT_DATA;
+  if(!p) return `<div class="screen" style="min-height:100vh"><div class="topbar"><button class="topbar-back" onclick="S.subScreen=null;render()">${I.back}</button><div class="topbar-title">Patient Detail</div></div><div style="padding:32px;text-align:center;color:var(--text3)">Loading...</div></div>`;
+  const checkins = p.recentCheckins||[];
+  const meds = p.medications||[];
+  const confirmed = meds.reduce((a,m)=>a+Object.values(m.logs||{}).filter(v=>v==='confirmed').length,0);
+  const missed = meds.reduce((a,m)=>a+Object.values(m.logs||{}).filter(v=>v==='missed').length,0);
+  const criticalToday = checkins[0]?.flag || checkins[0]?.feeling<=2;
+
+  return `<div class="screen" style="min-height:100vh;background:var(--bg)">
+    <div class="topbar" style="background:#fff">
+      <button class="topbar-back" onclick="S.subScreen=null;render()">${I.back}</button>
+      <div class="topbar-title">${p.name}</div>
+      <div style="display:flex;gap:6px">
+        <button class="icon-btn" onclick="editPatient('${p.patient_id}','${p.name}','${p.email||''}')" style="padding:5px 10px;font-size:12px">Edit</button>
+        <button class="icon-btn danger" onclick="deletePatient('${p.patient_id}','${p.name}')" style="padding:5px 10px;font-size:12px">Delete</button>
+      </div>
+    </div>
+    ${criticalToday?`<div class="alert-banner red" style="margin:12px 16px 0">${I.alert.replace('stroke="currentColor"','stroke="var(--danger)"')}
+      <div><strong>⚠️ Critical check-in today!</strong><br>${checkins[0]?.symptoms?.join(', ')||'Low feeling score'}. Please review immediately.</div>
+    </div>`:''}
+    <div class="patient-profile-card" style="margin:12px 16px 0">
+      <div class="pp-name">${p.name}</div>
+      <div class="pp-meta">${p.email||''} · Age ${p.age||'—'} · ${p.city||'—'}</div>
+      <div class="pp-tags" style="margin-top:8px">
+        ${(p.conditions||[]).map(c=>`<div class="pp-tag">${c}</div>`).join('')||'<div class="pp-tag">No conditions listed</div>'}
+      </div>
+      <div class="vitals-row" style="margin-top:12px">
+        <div class="vital-chip"><div class="vital-val">Day ${p.daysSince||0}</div><div class="vital-lbl">Post-Discharge</div></div>
+        <div class="vital-chip"><div class="vital-val">${p.adherenceToday||78}%</div><div class="vital-lbl">Adherence</div></div>
+        <div class="vital-chip"><div class="vital-val">${p.followupDate||'TBD'}</div><div class="vital-lbl">Follow-up</div></div>
+      </div>
+    </div>
+    <!-- Prescription summary -->
+    ${meds.length?`<div class="card" style="margin-top:14px">
+      <div class="card-title">Prescriptions (${meds.length})</div>
+      ${meds.map(m=>`<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)">
+        <span style="font-size:18px">💊</span>
+        <div style="flex:1">
+          <div style="font-size:13px;font-weight:600">${m.name}</div>
+          <div style="font-size:11px;color:var(--text2)">${m.freq||'OD'} · ${(m.times||[]).join(' + ')}</div>
+        </div>
+        <span class="badge ${Object.values(m.logs||{}).includes('missed')?'red':Object.values(m.logs||{}).includes('confirmed')?'green':'amber'}">
+          ${Object.values(m.logs||{}).includes('missed')?'Missed':Object.values(m.logs||{}).includes('confirmed')?'✓ Taken':'Pending'}
+        </span>
+      </div>`).join('')}
+      <div style="display:flex;gap:10px;margin-top:10px">
+        <div style="flex:1;text-align:center;padding:8px;background:var(--success-l);border-radius:8px"><div style="font-size:18px;font-weight:800;color:var(--primary)">${confirmed}</div><div style="font-size:11px;color:var(--text2)">Taken Today</div></div>
+        <div style="flex:1;text-align:center;padding:8px;background:var(--danger-l);border-radius:8px"><div style="font-size:18px;font-weight:800;color:var(--danger)">${missed}</div><div style="font-size:11px;color:var(--text2)">Missed Today</div></div>
+      </div>
+    </div>`:'<div class="card" style="margin-top:14px"><div style="font-size:13px;color:var(--text3);text-align:center;padding:8px">No prescriptions added yet</div></div>'}
+    <!-- Check-in history -->
+    <div class="sec-header" style="padding-top:16px"><div class="sec-title">Daily Check-in History</div></div>
+    ${checkins.length===0?`<div class="card" style="margin:0 16px 10px"><div style="font-size:13px;color:var(--text3);text-align:center;padding:8px">No check-ins submitted yet</div></div>`:''}
+    ${checkins.map(ci=>`
+      <div class="checkin-item" style="${(ci.flag||ci.feeling<=2)?'background:#FFF5F5;border-left:3px solid var(--danger);':''}">
+        <div class="ci-feel" style="background:${(ci.flag||ci.feeling<=2)?'var(--danger-l)':ci.feeling>=4?'var(--success-l)':'var(--amber-l)'}">
+          ${feelEmoji(ci.feeling)}
+        </div>
+        <div class="ci-meta">
+          <div class="ci-date" style="display:flex;align-items:center;gap:6px">
+            ${ci.date}
+            ${(ci.flag||ci.feeling<=2)?`<span class="badge red" style="font-size:10px">⚠️ Critical</span>`:''}
+            ${ci.feeling>=4&&!ci.flag?`<span class="badge green" style="font-size:10px">Good</span>`:''}
+          </div>
+          <div class="ci-feel-label">Feeling: ${feelLabel(ci.feeling)} (${ci.feeling}/5) · Pain: ${ci.pain}/10</div>
+          ${(ci.symptoms||[]).length?`<div class="ci-pain" style="color:${(ci.flag||ci.feeling<=2)?'var(--danger)':'var(--text3)'}">Symptoms: ${ci.symptoms.join(', ')}</div>`:''}
+          ${ci.note?`<div class="ci-note">"${ci.note}"</div>`:''}
+        </div>
+      </div>`).join('')}
+    <div style="padding:16px 16px 80px">
+      <button class="btn btn-primary" onclick="S.subScreen=null;render()">← Back to Patient List</button>
+    </div>
+  </div>`;
+}
+
 async function renderCarePathNurse(){
   if(S.subScreen==='discharge') return renderDischargeForm();
+  if(S.subScreen==='patientDetail') return await renderPatientDetail();
 
+  PATIENT_LIST = null;
   const practitioner = await loadPractitionerData();
   const patients = await loadPractitionerPatients();
   const red = patients.filter(x=>x.status==='red').length;
   const amber = patients.filter(x=>x.status==='amber').length;
-  const title = practitioner?.name || (S.role==='nurse' ? 'Nurse' : 'Doctor');
+  const green = patients.filter(x=>x.status==='green'||!x.status).length;
+  const title = practitioner?.name || currentUser?.full_name || (S.role==='nurse'?'Nurse':'Doctor');
+
+  // Sort: red first, amber next, green last
+  const sorted = [...patients].sort((a,b)=>{
+    const order={red:0,amber:1,green:2};
+    return (order[a.status]??2)-(order[b.status]??2);
+  });
+
+  function patCheckinSummary(pt){
+    const ci = pt.latestCheckin;
+    if(!ci) return {feeling:null,emoji:'❓',symptoms:[],label:'No check-in yet',flag:false};
+    const feeling = ci.feeling_score||3;
+    const isFlag = feeling<=2 || (ci.symptoms||[]).some(s=>['Chest pain','Breathlessness'].includes(s));
+    const label = isFlag?'Needs attention — check immediately':feeling>=4?'Recovering well':feeling===3?'Monitor closely':'Check-in flagged';
+    return {feeling, emoji:feelEmoji(feeling), symptoms:ci.symptoms||[], label, flag:isFlag};
+  }
 
   return `<div class="screen" style="min-height:100vh">
     <div class="topbar">
       <button class="topbar-back" onclick="nav('modules')">${I.back}</button>
-      <div class="topbar-title">CarePath</div>
+      <div class="topbar-title">CarePath — Post-Discharge</div>
       <div class="topbar-avatar" style="background:var(--blue)" title="${title}">${I.stethoscope.replace('stroke="currentColor"','stroke="white"').replace('width="20" height="20"','width="16" height="16"')}</div>
     </div>
-    <div style="padding:10px 16px 4px">
-      <div style="font-size:13px;color:var(--text2)">${t('post_discharge_dashboard')} · ${title}</div>
+    <div style="padding:8px 16px 4px">
+      <div style="font-size:13px;color:var(--text2)">${title} · Post-Discharge Dashboard</div>
     </div>
     <div class="stat-row">
-      <div class="stat-chip"><div class="stat-num">${patients.length}</div><div class="stat-label">${t('active_patients')}</div></div>
-      <div class="stat-chip red"><div class="stat-num">${red}</div><div class="stat-label">${t('urgent_alerts')}</div></div>
-      <div class="stat-chip amber"><div class="stat-num">${amber}</div><div class="stat-label">${t('monitor')}</div></div>
-      <div class="stat-chip green"><div class="stat-num">${patients.length-red-amber}</div><div class="stat-label">${t('all_good')}</div></div>
+      <div class="stat-chip"><div class="stat-num">${patients.length}</div><div class="stat-label">Total</div></div>
+      <div class="stat-chip red"><div class="stat-num">${red}</div><div class="stat-label">Critical</div></div>
+      <div class="stat-chip amber"><div class="stat-num">${amber}</div><div class="stat-label">Monitor</div></div>
+      <div class="stat-chip green"><div class="stat-num">${green}</div><div class="stat-label">Good</div></div>
     </div>
-    ${red>0?`<div class="alert-banner red">${I.alert.replace('stroke="currentColor"','stroke="var(--danger)"')} <span><strong>${t('urgent')}:</strong> ${t('missed_checkins_alert')}</span></div>`:''}
+    ${red>0?`<div class="alert-banner red">${I.alert.replace('stroke="currentColor"','stroke="var(--danger)"')}
+      <span><strong>⚠️ ${red} patient${red>1?'s':''} need${red===1?'s':''} urgent attention.</strong> Review critical check-ins below.</span></div>`:''}
     <div class="sec-header">
-      <div class="sec-title">${t('active_patients_title')}</div>
-      <button class="sec-action" onclick="addPatientForPractitioner()">+ Add Patient</button>
+      <div class="sec-title">Active Patients (${patients.length})</div>
+      <button class="sec-action" onclick="addPatientForPractitioner()">+ Add</button>
     </div>
     <div>
-      ${patients.length===0?`<div style="padding:16px;color:var(--text2)">No patients assigned yet. Add a patient to begin.</div>`:''}
-      ${patients.map((pt,i)=>`
-        <div class="patient-row" onclick="selectPatient(${pt.id})">
-          <div class="pat-avatar" style="background:${avColor(i)}">${pt.avatar || initials(pt.name)}</div>
-          <div style="flex:1">
-            <div class="pat-name">${pt.name}</div>
-            <div class="pat-sub">${(pt.condition || (pt.conditions||[]).join(' · ') || '')} · ${t('day_label')} ${pt.daysSince || 0}</div>
-            <div class="pat-sub" style="margin-top:2px">${t('last_checkin')}: ${pt.lastCheckin || ''}</div>
+      ${patients.length===0?`<div class="empty-state"><div class="emoji">🏥</div><p>No patients added yet.<br>Tap "Add New Patient" to get started.</p></div>`:''}
+      ${sorted.map((pt,i)=>{
+        const ci = patCheckinSummary(pt);
+        const isCritical = pt.status==='red';
+        return `<div class="patient-row" style="${isCritical?'background:#FFF5F5;border-left:3px solid var(--danger);':''}" onclick="selectPatient('${pt.id}')">
+          <div style="position:relative">
+            <div class="pat-avatar" style="background:${avColor(i)}">${pt.avatar||initials(pt.name)}</div>
+            ${isCritical?`<div style="position:absolute;top:-2px;right:-2px;width:12px;height:12px;background:var(--danger);border-radius:50%;border:2px solid #fff"></div>`:''}
           </div>
-          <div class="pat-status">
-            <span class="badge ${pt.status || 'green'}">${pt.status==='red'?t('status_alert'):pt.status==='amber'?t('status_monitor'):t('status_good')}</span>
-            <div style="font-size:10px;color:var(--text3)">${t('day_label')} ${pt.daysSince || 0}/14</div>
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:6px">
+              <div class="pat-name">${pt.name}</div>
+              ${isCritical?`<span class="badge red" style="font-size:10px">⚠️ Critical</span>`:''}
+            </div>
+            <div class="pat-sub">${pt.condition||'No conditions'} · Day ${pt.daysSince||0}</div>
+            <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
+              <span style="font-size:18px">${ci.emoji}</span>
+              <span style="font-size:12px;color:${isCritical?'var(--danger)':'var(--text2)'};">${ci.label}</span>
+            </div>
+            ${ci.symptoms.length?`<div style="font-size:11px;color:var(--danger);margin-top:2px">Symptoms: ${ci.symptoms.join(', ')}</div>`:''}
+            <div style="font-size:11px;color:var(--text3);margin-top:2px">Last check-in: ${pt.lastCheckin||'No check-in yet'}</div>
           </div>
-        </div>`).join('')}
+          <div class="pat-status" style="align-items:flex-end">
+            <span class="badge ${pt.status||'green'}" style="white-space:nowrap">${pt.status==='red'?'Needs Attention':pt.status==='amber'?'Monitor':'All Good'}</span>
+            <div style="display:flex;gap:4px;margin-top:6px">
+              <button class="icon-btn" style="padding:4px 8px;font-size:11px" onclick="event.stopPropagation();editPatient('${pt.id}','${pt.name}','${pt.email||''}')">Edit</button>
+              <button class="icon-btn danger" style="padding:4px 8px;font-size:11px" onclick="event.stopPropagation();deletePatient('${pt.id}','${pt.name}')">✕</button>
+            </div>
+          </div>
+        </div>`;
+      }).join('')}
     </div>
     <button class="float-btn" onclick="addPatientForPractitioner()">
-      ${I.plus.replace('stroke="currentColor"','stroke="white"')} ${t('discharge_new_patient')}
+      ${I.plus.replace('stroke="currentColor"','stroke="white"')} Add New Patient
     </button>
+    ${renderAddPatientModal()}
   </div>`;
 }
 
@@ -1881,152 +2299,182 @@ async function submitDischarge(){
 async function renderCarePathFamily(){
   const p = await loadFamilyPatient();
   const f = await loadFamilyData();
-  if(!p || !f) return `<div class="screen" style="min-height:100vh;padding:24px">${t('unable_to_load_patient_data') || 'Unable to load patient data.'}</div>`;
-  const daysSince = Math.floor((new Date() - new Date(p.dischargeDate)) / (1000 * 60 * 60 * 24));
-  const total=p.medications.reduce((acc,m)=>acc+m.times.length,0);
-  const confirmed=p.medications.reduce((acc,m)=>acc+Object.values(m.logs).filter(v=>v==='confirmed').length,0);
-  const adhPct=total>0?Math.round(confirmed/total*100):0;
-  const doctorName = typeof p.doctor === 'object' ? p.doctor.name : p.doctor || '';
-  return `<div class="screen" style="min-height:100vh">
+  if(!p) return `<div class="screen" style="min-height:100vh">
+    <div class="topbar"><button class="topbar-back" onclick="nav('modules')">${I.back}</button><div class="topbar-title">CarePath</div></div>
+    <div style="padding:32px 20px;text-align:center">
+      <div style="font-size:40px;margin-bottom:16px">👨‍👩‍👧</div>
+      <div style="font-size:18px;font-weight:700;color:var(--text);margin-bottom:8px">No patient linked yet</div>
+      <div style="font-size:14px;color:var(--text2);line-height:1.6;margin-bottom:24px">Ask your doctor to register your family member in CareConnect and link your email <strong>${S.email}</strong>.</div>
+      <button class="btn btn-primary" onclick="nav('modules')">← Back to Home</button>
+    </div>
+  </div>`;
+  const fName = f?.name||currentUser?.full_name||'Family';
+  const fInitials = fName.split(' ').map(n=>n[0]).join('').toUpperCase().slice(0,2)||'FM';
+  const checkins = (p.recentCheckins && p.recentCheckins.length) ? p.recentCheckins : DEMO_CHECKINS;
+  const todayCI = checkins[0];
+  const isCriticalCI = ci => ci.flag || ci.feeling <= 2 || (ci.symptoms||[]).some(s=>['Chest pain','Breathlessness'].includes(s));
+  const hasCriticalToday = todayCI && isCriticalCI(todayCI);
+  const criticalCount = checkins.filter(isCriticalCI).length;
+  return `<div class="screen" style="min-height:100vh;background:var(--bg)">
     <div class="topbar">
       <button class="topbar-back" onclick="nav('modules')">${I.back}</button>
-      <div class="topbar-title">CarePath</div>
-      <div class="topbar-avatar" style="background:var(--blue)">${f.name.split(' ').map(n=>n[0]).join('').toUpperCase()}</div>
+      <div class="topbar-title">CarePath — ${p.name.split(' ')[0]}</div>
+      <div class="topbar-avatar" style="background:var(--blue)">${fInitials}</div>
     </div>
-    <div class="patient-profile-card" style="margin-top:12px">
-      <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px">
-        ${p.photo ? `<img class="profile-photo" src="${p.photo}" alt="${p.name}">` : `<div class="pp-avatar-large" style="background:${p.avatarColor}">${p.avatar}</div>`}
-        <div style="flex:1">
-          <div class="pp-name">${p.name}</div>
-          <div class="pp-meta">${t('patient_profile')} · Age ${p.age} · ${p.city}</div>
-        </div>
-        <button class="topbar-avatar" title="${t('edit_profile')}" onclick="nav('profile')" style="background:${p.avatarColor};border:none;padding:0">
-          ${p.photo ? `<img class="profile-photo" src="${p.photo}" alt="${p.name}">` : p.avatar}
-        </button>
+    <div style="background:linear-gradient(135deg,#0B7A63,#085A49);padding:16px;color:#fff;display:flex;align-items:center;gap:12px">
+      <div style="width:48px;height:48px;border-radius:50%;background:rgba(255,255,255,.2);display:flex;align-items:center;justify-content:center;font-size:20px;border:2px solid rgba(255,255,255,.3);flex-shrink:0">${p.avatar}</div>
+      <div style="flex:1">
+        <div style="font-size:16px;font-weight:700">${p.name}</div>
+        <div style="font-size:12px;opacity:.8">${(p.conditions||[]).join(' · ')||'No conditions'}</div>
+        <div style="font-size:11px;opacity:.6;margin-top:2px">${checkins.length} check-ins recorded</div>
       </div>
-      <div class="pp-tags">
-        ${p.conditions.map(c=>`<div class="pp-tag">${c}</div>`).join('')}
-      </div>
-      <div class="vitals-row" style="margin-top:12px">
-        <div class="vital-chip"><div class="vital-val">Day ${daysSince}</div><div class="vital-lbl">${t('post_discharge')}</div></div>
-        <div class="vital-chip"><div class="vital-val">${adhPct}%</div><div class="vital-lbl">${t('adherence')}</div></div>
-        <div class="vital-chip"><div class="vital-val">${p.followupDate}</div><div class="vital-lbl">${t('follow_up')}</div></div>
+      <div style="text-align:center;flex-shrink:0">
+        <div style="font-size:26px;line-height:1">${feelEmoji(todayCI?.feeling||3)}</div>
+        <div style="font-size:10px;opacity:.8;margin-top:3px">Today</div>
       </div>
     </div>
-    <div class="card">
-      <div class="card-title">${t('symptom_trend_last_7_days')}</div>
-      <div class="trend-area" style="padding:0">${sparkLine()}</div>
-      <div style="display:flex;justify-content:space-between;margin-top:4px">
-        <div style="font-size:11px;color:var(--text3)">${new Date(Date.now() - 7*24*60*60*1000).toLocaleDateString('en-IN',{month:'short',day:'numeric'})}</div>
-        <div style="font-size:11px;color:var(--primary);font-weight:600">${t('improving')} ↑</div>
-        <div style="font-size:11px;color:var(--text3)">Today</div>
-      </div>
-    </div>
-    <div class="appt-card">
-      <div class="appt-date-box">
-        <div class="appt-date-day">${new Date(p.followupDate).getDate()}</div>
-        <div class="appt-date-month">${new Date(p.followupDate).toLocaleDateString('en-IN',{month:'short'}).toUpperCase()}</div>
-      </div>
-      <div class="appt-info">
-        <div class="appt-dr">${p.doctor}</div>
-        <div class="appt-type">${t('follow_up_consultation')} · ${t('opd')}</div>
-        <span class="badge blue">${t('confirmed')}</span>
-      </div>
-      <button class="icon-btn" onclick="alert('${t('reschedule_appointment')}')">${I.calendar}</button>
-    </div>
+    ${hasCriticalToday ? `<div class="alert-banner red">
+      ${I.alert.replace('stroke="currentColor"','stroke="var(--danger)"')}
+      <div><strong>Critical check-in today</strong><br>${p.name.split(' ')[0]} reported severe symptoms — please check in with them.</div>
+    </div>` : ''}
+    ${!hasCriticalToday && criticalCount > 0 ? `<div class="alert-banner amber">
+      ${I.info.replace('stroke="currentColor"','stroke="var(--warn)"')}
+      <div><strong>${criticalCount} critical entr${criticalCount>1?'ies':'y'} this week</strong><br>Consider contacting the doctor if symptoms persist.</div>
+    </div>` : ''}
     <div class="sec-header">
-      <div class="sec-title">${t('recent_checkins')}</div>
-      <button class="sec-action" onclick="alert('${t('full_checkin_history')}')">${t('see_all')}</button>
+      <div class="sec-title">Daily Check-ins (Last 7 Days)</div>
     </div>
-    ${p.recentCheckins.map(ci=>`
-      <div class="checkin-item">
-        <div class="ci-feel" style="background:${ci.flag?'var(--danger-l)':ci.feeling>=4?'var(--success-l)':ci.feeling===3?'var(--amber-l)':'var(--danger-l)'}">${feelEmoji(ci.feeling)}</div>
-        <div class="ci-meta">
-          <div class="ci-date">${ci.date}${ci.flag?`  <span class="badge red" style="padding:2px 6px">${t('nurse_alerted')}</span>`:''}</div>
-          <div class="ci-feel-label">${feelLabel(ci.feeling)} · ${t('pain_label')}: ${ci.pain}/10</div>
-          ${ci.symptoms.length?`<div class="ci-pain">${t('symptoms')}: ${ci.symptoms.join(', ')}</div>`:''}
-          ${ci.note?`<div class="ci-note">${ci.note}</div>`:''}
+    ${checkins.map(ci=>{
+      const crit = isCriticalCI(ci);
+      return `<div style="background:${crit?'var(--danger-l)':'#fff'};border-left:4px solid ${crit?'var(--danger)':ci.feeling>=4?'var(--success)':'var(--amber)'};margin:0 16px 10px;border-radius:12px;padding:14px;box-shadow:0 1px 4px rgba(0,0,0,.06)">
+        <div style="display:flex;align-items:flex-start;gap:10px">
+          <div style="font-size:28px;line-height:1;flex-shrink:0">${feelEmoji(ci.feeling)}</div>
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap">
+              <div style="font-size:13px;font-weight:600;color:var(--text)">${ci.date}</div>
+              ${crit?`<span class="badge red" style="padding:2px 7px;font-size:10px">⚠ Critical</span>`:ci.feeling>=4?`<span class="badge green" style="padding:2px 7px;font-size:10px">Good</span>`:''}
+            </div>
+            <div style="font-size:12px;color:var(--text2);margin-bottom:3px">${feelLabel(ci.feeling)} · Pain: ${ci.pain}/10</div>
+            ${(ci.symptoms||[]).length?`<div style="font-size:12px;color:${crit?'var(--danger)':'var(--text2)'};font-weight:${crit?600:400};margin-bottom:3px">Symptoms: ${ci.symptoms.join(', ')}</div>`:''}
+            ${ci.note?`<div style="font-size:12px;color:var(--text3);font-style:italic">"${ci.note}"</div>`:''}
+          </div>
         </div>
-      </div>`).join('')}
-    <div style="padding:16px">
-      <button class="btn btn-blue" onclick="alert('${t('book_appointment_form')}')">
-        ${I.calendar.replace('stroke="currentColor"','stroke="white"')} ${t('book_followup_appointment')}
-      </button>
+      </div>`;
+    }).join('')}
+    <div style="padding:12px 16px 32px;text-align:center">
+      <div style="font-size:12px;color:var(--text3)">Check-ins are submitted by the patient. Contact their doctor for medical advice.</div>
     </div>
   </div>`;
 }
 
 async function renderCarePathPatient(){
   const p = await loadPatientData();
-  const SYMPTOMS=['Fever','Headache','Nausea','Chest pain','Breathlessness','Weakness','Dizziness','Stomach pain'];
-  return `<div class="screen" style="min-height:100vh">
-    <div class="topbar">
+  if(!p) return `<div class="screen" style="min-height:100vh">
+    <div class="topbar"><button class="topbar-back" onclick="nav('modules')">${I.back}</button><div class="topbar-title">Daily Check-in</div></div>
+    <div style="padding:32px 20px;text-align:center">
+      <div style="font-size:40px;margin-bottom:16px">👋</div>
+      <div style="font-size:18px;font-weight:700;color:var(--text);margin-bottom:8px">Profile not set up yet</div>
+      <div style="font-size:14px;color:var(--text2);line-height:1.6;margin-bottom:24px">Ask your doctor to add your email <strong>${S.email}</strong> to CareConnect.</div>
+      <button class="btn btn-primary" onclick="nav('modules')">← Back to Home</button>
+    </div>
+  </div>`;
+  const daysSince = p.dischargeDate ? Math.floor((Date.now()-new Date(p.dischargeDate).getTime())/(1000*60*60*24)) : 13;
+  const firstName = p.name.split(' ')[0];
+  const SYMPTOM_OPTS = ['Fever','Headache','Nausea','Chest pain','Breathlessness','Dizziness','Weakness','Stomach pain'];
+  const hasOther = S.checkinSymptoms.includes('Other');
+  const isRedFlag = S.checkinSymptoms.some(s=>['Chest pain','Breathlessness'].includes(s)) || S.checkinFeel<=2;
+
+  return `<div class="screen" style="min-height:100vh;background:var(--bg)">
+    <div class="topbar" style="background:#fff">
       <button class="topbar-back" onclick="nav('modules')">${I.back}</button>
-      <div class="topbar-title">${t('daily_checkin')}</div>
-      <span class="badge green">Day 13</span>
+      <div class="topbar-title">Daily Check-in</div>
+      <span class="badge green">Day ${daysSince}</span>
     </div>
-    <div class="patient-profile-card" style="margin:16px 16px 0">
-      <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px">
-        ${p.photo ? `<img class="profile-photo" src="${p.photo}" alt="${p.name}">` : `<div class="pp-avatar-large" style="background:${p.avatarColor}">${p.avatar}</div>`}
-        <div style="flex:1">
-          <div class="pp-name">${p.name}</div>
-          <div class="pp-meta">${t('age_years', p.age)} · ${p.city}</div>
+    <!-- Profile summary -->
+    <div class="patient-profile-card" style="margin:12px 16px 0">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="font-size:32px">🙏</div>
+        <div>
+          <div style="font-size:18px;font-weight:700">How are you feeling today, ${firstName}?</div>
+          <div style="font-size:13px;opacity:.8;margin-top:2px">Your answers help your doctor and family monitor your recovery.</div>
         </div>
-        <button class="topbar-avatar" title="${t('edit_profile')}" onclick="nav('profile')" style="background:${p.avatarColor};border:none;padding:0;cursor:pointer">
-          ${p.photo ? `<img class="profile-photo" src="${p.photo}" alt="${p.name}">` : p.avatar}
-        </button>
-      </div>
-      <div class="pp-tags">
-        ${p.conditions.map(c=>`<div class="pp-tag">${c}</div>`).join('')}
-      </div>
-      <div class="vitals-row" style="margin-top:12px">
-        <div class="vital-chip"><div class="vital-val">Day 13</div><div class="vital-lbl">${t('post_discharge')}</div></div>
-        <div class="vital-chip"><div class="vital-val">${p.adherenceToday}%</div><div class="vital-lbl">${t('adherence')}</div></div>
-        <div class="vital-chip"><div class="vital-val">${p.followupDate}</div><div class="vital-lbl">${t('follow_up')}</div></div>
       </div>
     </div>
-    <div style="padding:16px">
-      <div style="font-size:20px;font-weight:700;color:var(--text)">${t('how_are_you')} ${p.name.split(' ')[0]}? 🙏</div>
-      <div style="font-size:14px;color:var(--text2);margin-top:4px">${t('how_are_you_help')}</div>
-    </div>
-    <div class="card">
-      <div class="card-title" style="margin-bottom:4px">${t('overall_feeling')}</div>
-      <div style="font-size:12px;color:var(--text3);margin-bottom:12px">${t('tap_emoji')}</div>
+    ${isRedFlag&&S.checkinFeel>0?`<div class="alert-banner red" style="margin:10px 16px 0">
+      ${I.alert.replace('stroke="currentColor"','stroke="var(--danger)"')}
+      <div><strong>⚠️ We're alerting your doctor and family.</strong> Your response indicates something needs attention.</div>
+    </div>`:''}
+    <!-- Q1: Overall feeling -->
+    <div class="card" style="margin-top:14px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+        <div style="width:22px;height:22px;border-radius:50%;background:var(--primary);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center">1</div>
+        <div class="card-title" style="margin:0">How are you feeling overall? <span style="color:var(--danger)">*</span></div>
+      </div>
+      <div style="font-size:12px;color:var(--text3);margin-bottom:12px;margin-left:30px">Rate from 1 (very bad) to 5 (great)</div>
       <div class="feeling-row">
         ${[1,2,3,4,5].map(f=>`
           <div class="feeling-btn ${S.checkinFeel===f?'selected':''}" onclick="S.checkinFeel=${f};render()">
-            ${feelEmoji(f)}
-            <div class="flabel">${['','Bad','Poor','OK','Good','Great'][f]}</div>
+            ${feelEmoji(f)}<div class="flabel">${['','Bad','Poor','OK','Good','Great'][f]}</div>
           </div>`).join('')}
       </div>
     </div>
+    <!-- Q2: Pain level -->
     <div class="card">
-      <div class="card-title">${t('pain_level')}</div>
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
-        <span style="font-size:13px;color:var(--text2)">${t('no_pain')}</span>
-        <input type="range" class="pain-slider" min="0" max="10" value="${S.checkinPain}" style="flex:1" oninput="S.checkinPain=parseInt(this.value);document.getElementById('painVal').textContent=this.value">
-        <span style="font-size:13px;color:var(--text2)">${t('severe')}</span>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <div style="width:22px;height:22px;border-radius:50%;background:var(--primary);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center">2</div>
+        <div class="card-title" style="margin:0">Pain level right now</div>
       </div>
-      <div style="text-align:center;font-size:28px;font-weight:800;font-family:'Outfit',sans-serif;color:${S.checkinPain<=3?'var(--success)':S.checkinPain<=6?'var(--amber)':'var(--danger)'}">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+        <span style="font-size:12px;color:var(--text2)">0 = No pain</span>
+        <input type="range" class="pain-slider" min="0" max="10" value="${S.checkinPain}" style="flex:1"
+          oninput="S.checkinPain=parseInt(this.value);document.getElementById('painVal').textContent=this.value">
+        <span style="font-size:12px;color:var(--text2)">10 = Severe</span>
+      </div>
+      <div style="text-align:center;font-size:26px;font-weight:800;font-family:'Outfit',sans-serif;color:${S.checkinPain<=3?'var(--success)':S.checkinPain<=6?'var(--amber)':'var(--danger)'}">
         <span id="painVal">${S.checkinPain}</span>/10
       </div>
     </div>
+    <!-- Q3: Symptoms -->
     <div class="card">
-      <div class="card-title">${t('any_symptoms')}</div>
-      <div style="font-size:12px;color:var(--text3);margin-bottom:8px">${t('tap_all_apply')}</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <div style="width:22px;height:22px;border-radius:50%;background:var(--primary);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center">3</div>
+        <div class="card-title" style="margin:0">Any symptoms today? <span style="font-size:12px;font-weight:400;color:var(--text3)">(select all that apply)</span></div>
+      </div>
       <div class="symptom-grid">
-        ${SYMPTOMS.map(s=>`<div class="symptom-chip ${S.checkinSymptoms.includes(s)?'selected':''}" onclick="toggleSymptom('${s}')">${s}</div>`).join('')}
+        ${SYMPTOM_OPTS.map(s=>`<div class="symptom-chip ${S.checkinSymptoms.includes(s)?'selected':''}" onclick="toggleSymptom('${s}')">${s}</div>`).join('')}
+        <div class="symptom-chip ${hasOther?'selected':''}" onclick="toggleSymptom('Other')">+ Other</div>
+      </div>
+      ${hasOther?`<input class="form-input" style="margin-top:10px" placeholder="Describe your other symptoms..." value="${S.otherSymptomText}"
+        oninput="S.otherSymptomText=this.value">`:''}
+    </div>
+    <!-- Q4: Appetite -->
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+        <div style="width:22px;height:22px;border-radius:50%;background:var(--primary);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center">4</div>
+        <div class="card-title" style="margin:0">How was your appetite today?</div>
+      </div>
+      <div style="display:flex;gap:10px">
+        ${[['Good','😋'],['Fair','😐'],['Poor','😔']].map(([opt,emoji])=>`
+          <div onclick="S.checkinAppetite='${opt}';render()" style="flex:1;padding:12px 8px;border:2px solid ${S.checkinAppetite===opt?'var(--primary)':'var(--border)'};border-radius:12px;text-align:center;cursor:pointer;background:${S.checkinAppetite===opt?'var(--primary-l)':'#fff'};transition:.2s">
+            <div style="font-size:22px">${emoji}</div>
+            <div style="font-size:12px;font-weight:700;color:${S.checkinAppetite===opt?'var(--primary)':'var(--text2)'};margin-top:4px">${opt}</div>
+          </div>`).join('')}
       </div>
     </div>
+    <!-- Q5: Note to doctor -->
     <div class="card">
-      <div class="card-title">${t('anything_else')}</div>
-      <textarea class="form-input" rows="3" style="resize:none" placeholder="${t('symptom_placeholder')}"></textarea>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <div style="width:22px;height:22px;border-radius:50%;background:var(--primary);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center">5</div>
+        <div class="card-title" style="margin:0">Anything to tell your doctor or family?</div>
+      </div>
+      <textarea id="checkinNote" class="form-input" rows="3" style="resize:none"
+        placeholder="e.g., I slept well. Took my morning medicines on time. Felt a bit dizzy after walking."></textarea>
     </div>
     <div style="padding:0 16px 24px">
       <button class="btn btn-primary" onclick="submitCheckin()" ${S.checkinFeel===0?'disabled style="opacity:.5;cursor:not-allowed"':''}>
-        ${I.check.replace('stroke="currentColor"','stroke="white"')} ${t('submit_checkin')}
+        ${I.check.replace('stroke="currentColor"','stroke="white"')} Submit Today's Check-in
       </button>
-      ${S.checkinFeel===0?`<div style="text-align:center;font-size:12px;color:var(--text3);margin-top:8px">${t('select_feeling_first')}</div>`:''}
+      ${S.checkinFeel===0?`<div style="text-align:center;font-size:12px;color:var(--text3);margin-top:8px">Please rate your feeling first (Question 1)</div>`:''}
     </div>
   </div>`;
 }
@@ -2036,13 +2484,68 @@ function toggleSymptom(s){
   else S.checkinSymptoms.push(s);
   render();
 }
-function submitCheckin(){
-  const hasRedFlag=S.checkinSymptoms.some(s=>['Chest pain','Breathlessness'].includes(s));
-  const alertMsg=hasRedFlag?'\n\n⚠️ Nurse Priya Desai has been alerted about the red-flag symptom.':
-    S.checkinFeel<3?'\n\n📬 Your check-in has been sent to your family and nurse.':
-    '\n\n✅ Check-in sent to Vikram and Nurse Priya.';
-  alert(`Check-in submitted! Thank you, Ramabai. 🙏${alertMsg}`);
-  S.checkinFeel=0; S.checkinPain=3; S.checkinSymptoms=[];
+async function submitCheckin(){
+  if(S.checkinFeel===0){ alert(t('select_feeling_first')); return; }
+  if(!currentPatientId){
+    alert('Your profile is not linked to a patient record.\nPlease ask your doctor to add your email to CareConnect.');
+    return;
+  }
+  const hasRedFlag = S.checkinSymptoms.some(s=>['Chest pain','Breathlessness'].includes(s));
+  const isCritical = hasRedFlag || S.checkinFeel<=2;
+  const note = document.getElementById('checkinNote')?.value?.trim() || '';
+  const symptoms = [...S.checkinSymptoms];
+  if(S.otherSymptomText.trim()) symptoms.push(S.otherSymptomText.trim());
+
+  const today = new Date().toISOString().split('T')[0];
+
+  const record = {
+    patient_id: currentPatientId,
+    checkin_date: today,
+    feeling_score: S.checkinFeel,
+    pain_level: S.checkinPain,
+    symptoms,
+    notes: note,
+    note: note,
+  };
+
+  // Delete any existing check-in for today, then insert fresh (avoids needing a unique constraint)
+  await sb.from('daily_checkins').delete()
+    .eq('patient_id', currentPatientId)
+    .eq('checkin_date', today)
+    .catch(() => {});
+  const { error } = await safeInsert('daily_checkins', record);
+
+  if(error){
+    console.error('Check-in save error:', error);
+    alert('Unable to save check-in: ' + error.message + '\nPlease try again.');
+    return;
+  }
+
+  if(isCritical){
+    await sb.from('patients').update({status:'red'}).eq('patient_id',currentPatientId).catch(()=>{});
+  }
+
+  // Refresh local checkin data so doctor dashboard is up to date
+  const { data: fresh } = await sb.from('daily_checkins').select('*')
+    .eq('patient_id', currentPatientId)
+    .order('checkin_date',{ascending:false}).limit(7);
+  if(fresh) currentCheckins = fresh;
+  if(PATIENT_DATA) PATIENT_DATA.recentCheckins = currentCheckins.map(c=>({
+    date:c.checkin_date,
+    feeling:c.feeling_score||c.feeling||3,
+    pain:c.pain_level||c.pain||3,
+    symptoms:c.symptoms||[],
+    note:c.notes||c.note||c.patient_notes||c.message||c.description||'',
+    flag:(((c.feeling_score||c.feeling)||3)<=2||(c.symptoms||[]).some(s=>['Chest pain','Breathlessness'].includes(s)))||false
+  }));
+
+  const alertMsg = isCritical
+    ? '\n\n⚠️ Your doctor and family have been alerted. Please contact your doctor.'
+    : S.checkinFeel<3
+      ? '\n\n📬 Check-in sent to your family and doctor for review.'
+      : '\n\n✅ Check-in sent to your family and doctor. Keep it up!';
+  alert(`Check-in submitted! Thank you. 🙏${alertMsg}`);
+  S.checkinFeel=0; S.checkinPain=3; S.checkinSymptoms=[]; S.otherSymptomText=''; S.checkinAppetite='';
   nav('modules');
 }
 
@@ -2144,212 +2647,231 @@ function renderCareMeds(){
 }
 
 async function renderCareMedsFamily(){
-  const p = await loadPatientData();
+  const p = await loadFamilyPatient();
   const f = await loadFamilyData();
-  if(!p || !f) return `<div class="screen" style="min-height:100vh;padding:24px">${t('unable_to_load_patient_data') || 'Unable to load patient data.'}</div>`;
-  const total=p.medications.reduce((acc,m)=>acc+m.times.length,0);
-  const confirmed=p.medications.reduce((acc,m)=>acc+Object.values(m.logs).filter(v=>v==='confirmed').length,0);
-  const missed=p.medications.reduce((acc,m)=>acc+Object.values(m.logs).filter(v=>v==='missed').length,0);
-  const adhPct=Math.round(confirmed/total*100);
-  const weeklyAdh = Math.round((p.adherenceWeek.reduce((a,b)=>a+b,0)||0)/(p.adherenceWeek.length||1));
-  const doctorName = typeof p.doctor === 'object' ? p.doctor.name : p.doctor || '';
-  return `<div class="screen" style="min-height:100vh">
+  if(!p) return `<div class="screen" style="min-height:100vh">
+    <div class="topbar"><button class="topbar-back" onclick="nav('modules')">${I.back}</button><div class="topbar-title">CareMeds</div></div>
+    <div style="padding:32px 20px;text-align:center">
+      <div style="font-size:40px;margin-bottom:16px">💊</div>
+      <div style="font-size:18px;font-weight:700;color:var(--text);margin-bottom:8px">No patient linked yet</div>
+      <div style="font-size:14px;color:var(--text2);line-height:1.6;margin-bottom:24px">Your family member's medicine schedule will appear here once a doctor registers them in CareConnect.</div>
+      <button class="btn btn-primary" onclick="nav('modules')">← Back to Home</button>
+    </div>
+  </div>`;
+  const meds = p.medications||[];
+  const total = meds.reduce((acc,m)=>acc+(m.times||[]).length,0);
+  const confirmed = meds.reduce((acc,m)=>acc+Object.values(m.logs||{}).filter(v=>v==='confirmed').length,0);
+  const missed = meds.reduce((acc,m)=>acc+Object.values(m.logs||{}).filter(v=>v==='missed').length,0);
+  const pending = total - confirmed - missed;
+  const doctorName = typeof p.doctor==='object'?p.doctor?.name:p.doctor||'';
+  const fInitials2 = (f?.name||'FM').split(' ').map(n=>n[0]).join('').toUpperCase().slice(0,2)||'FM';
+  return `<div class="screen" style="min-height:100vh;background:var(--bg)">
     <div class="topbar">
       <button class="topbar-back" onclick="nav('modules')">${I.back}</button>
-      <div class="topbar-title">CareMeds</div>
-      <div class="topbar-avatar" style="background:var(--blue)">${f.name.split(' ').map(n=>n[0]).join('').toUpperCase()}</div>
+      <div class="topbar-title">CareMeds — ${p.name.split(' ')[0]}</div>
+      <div class="topbar-avatar" style="background:var(--blue)">${fInitials2}</div>
     </div>
-    <!-- PATIENT HEADER -->
     <div style="background:linear-gradient(135deg,#0B7A63,#085A49);padding:16px;color:#fff;display:flex;align-items:center;gap:14px">
       <div style="width:50px;height:50px;border-radius:50%;background:rgba(255,255,255,.2);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;border:2px solid rgba(255,255,255,.3);flex-shrink:0">${p.avatar}</div>
       <div style="flex:1">
         <div style="font-size:16px;font-weight:700">${p.name}</div>
         <div style="font-size:12px;opacity:.8">${(p.conditions||[]).join(' · ')}</div>
-        <div style="font-size:11px;opacity:.6;margin-top:3px">Last sync: ${p.lastCheckin || ''} · Dr. ${doctorName.replace('Dr. ','')}</div>
+        <div style="font-size:11px;opacity:.6;margin-top:3px">Dr. ${doctorName.replace('Dr. ','')}</div>
       </div>
-      <button class="icon-btn" style="background:rgba(255,255,255,.15);border-color:rgba(255,255,255,.3);color:#fff" onclick="alert('${t('sync_alert_message')}')">
-        ${I.refresh.replace('stroke="currentColor"','stroke="white"')} ${t('sync')}
-      </button>
     </div>
-    <!-- ADHERENCE STATS -->
     <div class="stat-row">
-      <div class="stat-chip">
-        <div class="stat-num" style="color:var(--primary)">${adhPct}%</div>
-        <div class="stat-label">${t('today')}</div>
-      </div>
-      <div class="stat-chip green">
-        <div class="stat-num">${confirmed}</div>
-        <div class="stat-label">${t('confirmed')}</div>
-      </div>
-      <div class="stat-chip red">
-        <div class="stat-num">${missed}</div>
-        <div class="stat-label">${t('missed')}</div>
-      </div>
-      <div class="stat-chip amber">
-        <div class="stat-num">${total-confirmed-missed}</div>
-        <div class="stat-label">${t('pending')}</div>
-      </div>
+      <div class="stat-chip green"><div class="stat-num">${confirmed}</div><div class="stat-label">Taken today</div></div>
+      <div class="stat-chip red"><div class="stat-num">${missed}</div><div class="stat-label">Missed</div></div>
+      <div class="stat-chip amber"><div class="stat-num">${pending}</div><div class="stat-label">Pending</div></div>
+      <div class="stat-chip"><div class="stat-num">${meds.length}</div><div class="stat-label">Medicines</div></div>
     </div>
-    <!-- MISSED DOSE ALERT -->
     ${missed>0?`<div class="alert-banner red">
       ${I.alert.replace('stroke="currentColor"','stroke="var(--danger)"')}
-      <div><strong>${t('missed_dose_alert_title')}</strong><br>${t('missed_dose_alert_body')}</div>
+      <div><strong>Missed dose today</strong><br>${p.name.split(' ')[0]} has ${missed} missed dose${missed>1?'s':''} today.</div>
     </div>`:''}
-    <!-- DOSE GRID -->
-    <div class="card">
-      <div class="card-title">${t('todays_dose_schedule')}</div>
-      <div style="overflow-x:auto">
-        <table class="med-table">
-          <tr><th style="text-align:left">${t('medicine')}</th><th>🌅 ${t('morning')}</th><th>☀️ ${t('afternoon')}</th><th>🌆 ${t('evening')}</th><th>🌙 ${t('night')}</th></tr>
-          ${p.medications.map(m=>`
-            <tr>
-              <td>
-                <div style="display:flex;align-items:center;gap:6px">
-                  <div style="width:8px;height:8px;border-radius:50%;background:${m.color};flex-shrink:0"></div>
-                  <span style="font-size:12px">${m.name}</span>
+    <div class="sec-header"><div class="sec-title">Weekly Adherence by Medicine</div></div>
+    <div style="padding:0 16px">
+      ${meds.length===0?`<div style="text-align:center;padding:24px;color:var(--text2)">No medicines prescribed yet</div>`:
+        meds.map((m,mi)=>{
+          const weekData = DEMO_WEEK[mi%DEMO_WEEK.length];
+          const wkConf = weekData.filter(s=>s==='confirmed').length;
+          const wkTotal = weekData.filter(s=>s!=='pending').length||7;
+          const wkPct = Math.round(wkConf/wkTotal*100);
+          const noteKey = mi+':note';
+          const patNote = S.medNotes[noteKey]||'';
+          return `<div class="card" style="margin-bottom:12px;padding:14px">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+              <div style="display:flex;align-items:center;gap:8px">
+                <div style="width:34px;height:34px;border-radius:50%;background:${m.bg||'#E8F5F2'};display:flex;align-items:center;justify-content:center;font-size:15px">💊</div>
+                <div>
+                  <div style="font-size:14px;font-weight:700;color:var(--text)">${m.name}</div>
+                  <div style="font-size:11px;color:var(--text3)">${m.freq||'OD'} · ${(m.times||[]).join(' + ')}</div>
                 </div>
-              </td>
-              <td>${doseDot(m.logs.morning)}</td>
-              <td>${doseDot(m.logs.afternoon)}</td>
-              <td>${doseDot(m.logs.evening)}</td>
-              <td>${doseDot(m.logs.night)}</td>
-            </tr>`).join('')}
-        </table>
-      </div>
-      <div style="display:flex;gap:12px;margin-top:12px;flex-wrap:wrap">
-        <div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)"><div class="dose-dot confirmed" style="width:16px;height:16px;font-size:9px">${I.check.replace('stroke="currentColor"','stroke="var(--success)"')}</div>${t('confirmed')}</div>
-        <div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)"><div class="dose-dot missed" style="width:16px;height:16px;font-size:9px">${I.x.replace('stroke="currentColor"','stroke="var(--danger)"')}</div>${t('missed')}</div>
-        <div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)"><div class="dose-dot pending" style="width:16px;height:16px"></div>${t('pending')}</div>
-      </div>
-    </div>
-    <!-- WEEKLY TREND -->
-    <div class="card">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-        <div class="card-title" style="margin:0">${t('weekly_adherence')}</div>
-        <div style="font-size:22px;font-weight:800;font-family:'Outfit',sans-serif;color:var(--primary)">${weeklyAdh}%</div>
-      </div>
-      <div class="week-bars">${weekBars()}</div>
-      <div style="display:flex;justify-content:space-between;margin-top:8px;font-size:11px;color:var(--text3)">
-        <span>${t('last_monday')}</span><span>${t('this_sunday')}</span>
-      </div>
-    </div>
-    <!-- DRUG INTERACTION -->
-    <div class="interaction-flag">
-      ${I.alert.replace('stroke="currentColor"','stroke="var(--warn)"')}
-      <div>
-        <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:3px">${t('drug_interaction_notice')}</div>
-        <div style="font-size:12px;color:var(--text2)">${t('drug_interaction_body')}</div>
-      </div>
-    </div>
-    <!-- MEDICINES LIST -->
-    <div class="sec-header">
-      <div class="sec-title">${t('medicine_list')}</div>
-      <button class="sec-action" onclick="nav('caremeds','addmed')">+ ${t('add')}</button>
-    </div>
-    ${p.medications.map(m=>`
-      <div class="rx-card">
-        <div class="rx-header">
-          <div style="display:flex;align-items:center;gap:10px">
-            <div style="width:36px;height:36px;border-radius:50%;background:${m.bg};display:flex;align-items:center;justify-content:center;font-size:16px">💊</div>
-            <div>
-              <div class="rx-med-name">${m.name}</div>
-              <div class="rx-med-detail">${m.freq} · ${m.times.join(' + ')}</div>
+              </div>
+              <div style="text-align:right">
+                <div style="font-size:18px;font-weight:800;font-family:'Outfit',sans-serif;color:${wkPct>=80?'var(--success)':wkPct>=50?'var(--amber)':'var(--danger)'}">${wkPct}%</div>
+                <div style="font-size:10px;color:var(--text3)">this week</div>
+              </div>
             </div>
-          </div>
-          <span class="badge ${Object.values(m.logs).includes('missed')?'red':Object.values(m.logs).includes('confirmed')?'green':'amber'}">
-            ${Object.values(m.logs).includes('missed')?'Missed today':Object.values(m.logs).includes('confirmed')?'Confirmed':'Pending'}
-          </span>
-        </div>
-        <div class="rx-actions">
-          <button class="icon-btn" onclick="alert('Edit ${m.name} schedule: dose, timing, frequency')">${I.calendar} Edit Schedule</button>
-          <button class="icon-btn" onclick="alert('Pause reminders for ${m.name} for today?')">${I.info} Pause</button>
-        </div>
-      </div>`).join('')}
-    <div style="padding:12px 16px 16px">
-      <div style="font-size:11px;color:var(--text3);text-align:center">${t('next_ivr_call_info')}</div>
+            <div style="display:flex;gap:3px;margin-bottom:${patNote?'8':'0'}px">
+              ${WEEK_DAYS.map((day,di)=>{
+                const s=weekData[di];
+                return `<div style="flex:1;text-align:center">
+                  <div style="font-size:9px;color:var(--text3);margin-bottom:3px;font-weight:600">${day.slice(0,1)}</div>
+                  <div style="height:28px;border-radius:5px;background:${s==='confirmed'?'var(--success)':s==='missed'?'var(--danger)':'var(--bg)'};border:1px solid ${s==='confirmed'?'var(--success)':s==='missed'?'var(--danger)':'var(--border)'};display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:${s==='confirmed'||s==='missed'?'#fff':'var(--text3)'}">
+                    ${s==='confirmed'?'✓':s==='missed'?'✗':'·'}
+                  </div>
+                </div>`;
+              }).join('')}
+            </div>
+            ${patNote?`<div style="background:var(--bg);border-radius:8px;padding:8px 10px;margin-top:4px">
+              <div style="font-size:10px;color:var(--text3);margin-bottom:2px;font-weight:600;text-transform:uppercase;letter-spacing:.5px">Patient note</div>
+              <div style="font-size:12px;color:var(--text2);font-style:italic">"${patNote}"</div>
+            </div>`:''}
+          </div>`;
+        }).join('')}
+    </div>
+    <div style="padding:0 16px 12px;display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)"><div style="width:14px;height:14px;border-radius:3px;background:var(--success)"></div>Taken</div>
+      <div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)"><div style="width:14px;height:14px;border-radius:3px;background:var(--danger)"></div>Missed</div>
+      <div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)"><div style="width:14px;height:14px;border-radius:3px;background:var(--bg);border:1px solid var(--border)"></div>Pending</div>
+    </div>
+    <div style="padding:4px 16px 32px;text-align:center">
+      <div style="font-size:11px;color:var(--text3)">Read-only view. Contact the doctor to change prescriptions.</div>
     </div>
   </div>`;
 }
 
 async function renderCareMedsDoctor(){
-  const p = await loadPatientData();
-  return `<div class="screen" style="min-height:100vh">
-    <div class="topbar">
-      <button class="topbar-back" onclick="nav('modules')">${I.back}</button>
-      <div class="topbar-title">CareMeds</div>
-      <div class="topbar-avatar" style="background:var(--purple)">DR</div>
-    </div>
-    <div style="background:linear-gradient(135deg,#5B21B6,#7C3AED);padding:16px;color:#fff">
-      <div style="font-size:16px;font-weight:700">${S.role==='doctor'?'Dr. Rajesh Sharma — Prescription Manager':'Nurse Priya Desai — Medication Review'}</div>
-      <div style="font-size:13px;opacity:.8;margin-top:2px">Nashik Civil Hospital · ${S.role==='doctor'?'OPD Block B':'Ward 3'}</div>
-    </div>
-    <div style="padding:14px 16px 8px">
-      <div class="form-group" style="margin:0">
-        <div style="position:relative">
-          <div style="position:absolute;left:12px;top:50%;transform:translateY(-50%)">${I.user.replace('stroke="currentColor"','stroke="var(--text3)"')}</div>
-          <input class="form-input" style="padding-left:40px" placeholder="Search patient..." value="Ramabai Kulkarni" onclick="alert('Patient search would open — type to filter active patients')">
-        </div>
+  const practitioner = await loadPractitionerData();
+  const drName = practitioner?.name || currentUser?.full_name || 'Doctor';
+
+  if(S.selectedDoctorPatient){
+    const p = PATIENT_DATA;
+    const meds = p?.medications || [];
+    const confirmed = meds.reduce((a,m)=>a+Object.values(m.logs||{}).filter(v=>v==='confirmed').length,0);
+    const missed = meds.reduce((a,m)=>a+Object.values(m.logs||{}).filter(v=>v==='missed').length,0);
+    const total = meds.reduce((a,m)=>a+(m.times||[]).length,0);
+    const pending = total - confirmed - missed;
+
+    return `<div class="screen" style="min-height:100vh;background:var(--bg)">
+      <div class="topbar" style="background:#fff">
+        <button class="topbar-back" onclick="clearDoctorPatient()">${I.back}</button>
+        <div class="topbar-title">CareMeds · ${S.selectedDoctorPatient.name?.split(' ')[0]}</div>
+        <div class="topbar-avatar" style="background:var(--purple);font-size:11px">RX</div>
       </div>
-    </div>
-    <!-- VOICE PRESCRIPTION -->
-    <div style="padding:0 16px 14px">
-      <div class="card-title" style="margin-bottom:10px">Add New Prescription</div>
-      <button class="voice-btn ${S.rxRecording?'recording':''}" id="voiceBtn" onclick="toggleRecording()">
-        ${I.mic} ${S.rxRecording?'🔴 Recording — speak medicine name and dose...':'Dictate Prescription by Voice'}
-      </button>
-      ${S.rxRecording?`<div style="background:var(--danger-l);border-radius:var(--r-sm);padding:10px;font-size:13px;color:var(--danger);margin-bottom:8px;font-style:italic">
-        "Metformin five hundred milligrams, twice daily, morning and night, for 30 days..."
-        <div style="font-size:11px;margin-top:6px;color:var(--text2);font-style:normal">Transcribing via AI... <span style="color:var(--primary)">Auto-extracting medicine, dose, frequency</span></div>
-      </div>`:``}
-    </div>
-    <!-- CURRENT PATIENT -->
-    <div class="patient-profile-card" style="margin:0 16px 14px">
-      <div class="pp-name">${p.name}</div>
-      <div class="pp-meta">Age ${p.age} · ${p.hospital}</div>
-      <div class="pp-tags">
-        ${p.conditions.map(c=>`<div class="pp-tag">${c}</div>`).join('')}
+      <div style="background:linear-gradient(135deg,#5B21B6,#7C3AED);padding:16px;color:#fff">
+        <div style="font-size:16px;font-weight:700">${S.selectedDoctorPatient.name}</div>
+        <div style="font-size:13px;opacity:.8;margin-top:2px">${(S.selectedDoctorPatient.conditions||[]).join(' · ')||'No conditions listed'} · Day ${S.selectedDoctorPatient.daysSince||0}</div>
       </div>
-      <div class="vitals-row" style="margin-top:12px">
-        <div class="vital-chip"><div class="vital-val">78%</div><div class="vital-lbl">Adherence</div></div>
-        <div class="vital-chip"><div class="vital-val">1 missed</div><div class="vital-lbl">Today</div></div>
-        <div class="vital-chip"><div class="vital-val">Day 13</div><div class="vital-lbl">Post-D</div></div>
+      <!-- Daily summary -->
+      <div class="stat-row">
+        <div class="stat-chip green"><div class="stat-num">${confirmed}</div><div class="stat-label">Taken Today</div></div>
+        <div class="stat-chip red"><div class="stat-num">${missed}</div><div class="stat-label">Missed</div></div>
+        <div class="stat-chip amber"><div class="stat-num">${pending}</div><div class="stat-label">Pending</div></div>
+        <div class="stat-chip"><div class="stat-num">${total>0?Math.round(confirmed/total*100):'-'}%</div><div class="stat-label">Adherence</div></div>
       </div>
-    </div>
-    <div class="interaction-flag" style="margin:0 16px 12px">
-      ${I.alert.replace('stroke="currentColor"','stroke="var(--warn)"')}
-      <div><strong style="font-size:13px">Drug Interaction Detected:</strong>
-        <div style="font-size:12px;margin-top:3px">Amlodipine + Atorvastatin — Moderate: Monitor for myopathy. Consider dose adjustment if symptoms arise.</div>
+      ${missed>0?`<div class="alert-banner red" style="margin:0 16px 10px">${I.alert.replace('stroke="currentColor"','stroke="var(--danger)"')}
+        <div><strong>${missed} dose${missed>1?'s':''} missed today.</strong> Patient or family may need a reminder call.</div>
+      </div>`:''}
+      <!-- Prescription tracker per name -->
+      <div class="sec-header">
+        <div class="sec-title">Prescription Record — Today</div>
+        <button class="sec-action" onclick="addPatientForPractitioner()">+ Add Med</button>
       </div>
-    </div>
-    <div class="sec-header">
-      <div class="sec-title">Current Prescription</div>
-      <button class="sec-action" onclick="alert('Add medicine manually — form would open here')">+ Add</button>
-    </div>
-    ${p.medications.map(m=>`
-      <div class="rx-card">
-        <div class="rx-header">
-          <div>
-            <div class="rx-med-name">${m.name}</div>
-            <div class="rx-med-detail">${m.freq} · ${m.times.join(', ')} · ${p.name}</div>
+      ${meds.length===0?`<div class="empty-state"><div class="emoji">💊</div><p>No prescriptions yet.<br>Click "+ Add Med" to add prescriptions.</p></div>`:''}
+      ${meds.map((m,mi)=>{
+        const logs = m.logs||{};
+        const slots = [['morning','🌅 Morning'],['afternoon','☀️ Afternoon'],['night','🌙 Night']];
+        const activeLogs = slots.filter(([k])=>logs[k]&&logs[k]!=='na');
+        return `<div class="rx-card">
+          <div class="rx-header">
+            <div style="display:flex;align-items:center;gap:10px">
+              <div style="width:36px;height:36px;border-radius:50%;background:${['#E8F5F2','#EFF6FF','#EDE9FE','#FEE2E2'][mi%4]};display:flex;align-items:center;justify-content:center;font-size:18px">💊</div>
+              <div>
+                <div class="rx-med-name">${m.name}</div>
+                <div class="rx-med-detail">${m.freq||'OD'} · ${(m.times||[]).join(' + ')}</div>
+              </div>
+            </div>
+            <span class="badge teal">Active</span>
           </div>
-          <span class="badge teal">Active</span>
-        </div>
-        <div class="rx-badge-row">
-          <span class="badge blue">Prescribed: Apr 1</span>
-          <span class="badge ${Object.values(m.logs).includes('missed')?'red':'green'}">
-            ${Object.values(m.logs).includes('missed')?'Missed today':'Adherent'}
-          </span>
-        </div>
-        <div class="rx-actions">
-          <button class="icon-btn" onclick="alert('Edit ${m.name}: change dose, frequency, duration')">${I.calendar} Edit</button>
-          <button class="icon-btn danger" onclick="if(confirm('Stop ${m.name} for this patient?')) alert('Stopped. Patient and family will be notified.')">${I.x} Stop</button>
-        </div>
-      </div>`).join('')}
-    <div style="padding:16px;padding-bottom:24px">
-      <button class="btn btn-primary" onclick="alert('Weekly adherence report for Ramabai Kulkarni:\n\n• Week 1: 82% adherence\n• Week 2 (current): 78% — Atorvastatin missed twice\n\nRecommendation: Discuss evening reminder setup with family.')">
-        ${I.trending.replace('stroke="currentColor"','stroke="white"')} View Adherence Report
-      </button>
+          <div style="padding:10px 16px">
+            ${activeLogs.map(([k,label])=>`
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border)">
+                <span style="font-size:13px;font-weight:600;color:var(--text2)">${label}</span>
+                <span class="badge ${logs[k]==='confirmed'?'green':logs[k]==='missed'?'red':'amber'}" style="font-size:12px">
+                  ${logs[k]==='confirmed'?'✓ Taken':logs[k]==='missed'?'✗ Missed':'● Pending'}
+                </span>
+              </div>`).join('')}
+            ${!activeLogs.length?`<div style="font-size:12px;color:var(--text3);padding:6px 0">No schedule assigned</div>`:''}
+          </div>
+          <!-- Weekly bars -->
+          <div style="padding:8px 16px 12px">
+            <div style="font-size:11px;font-weight:700;color:var(--text3);margin-bottom:6px">WEEK ADHERENCE</div>
+            <div style="display:flex;gap:3px">
+              ${(DEMO_WEEK[mi%DEMO_WEEK.length]||[]).map((status,di)=>`
+                <div style="flex:1;text-align:center">
+                  <div style="height:6px;border-radius:3px;background:${status==='confirmed'?'var(--success)':status==='missed'?'var(--danger)':'var(--border2)'}"></div>
+                  <div style="font-size:9px;color:var(--text3);margin-top:3px">${WEEK_DAYS[di].slice(0,1)}</div>
+                </div>`).join('')}
+            </div>
+          </div>
+          <div class="rx-actions">
+            <button class="icon-btn" onclick="alert('Edit ${m.name}: change dose, frequency, duration')">${I.calendar} Edit</button>
+            <button class="icon-btn danger" onclick="if(confirm('Stop ${m.name}?')) alert('Stopped. Patient and family notified.')">${I.x} Stop</button>
+          </div>
+        </div>`;
+      }).join('')}
+      <div style="padding:16px 16px 80px">
+        <button class="btn btn-primary" onclick="alert('Weekly adherence report generated for ${S.selectedDoctorPatient.name}')">
+          ${I.trending.replace('stroke="currentColor"','stroke="white"')} View Full Adherence Report
+        </button>
+      </div>
+    </div>`;
+  }
+
+  // Patient list — always reload to show latest adherence and check-in data
+  PATIENT_LIST = null;
+  const patients = await loadPractitionerPatients();
+  return `<div class="screen" style="min-height:100vh;background:var(--bg)">
+    <div class="topbar" style="background:#fff">
+      <button class="topbar-back" onclick="nav('modules')">${I.back}</button>
+      <div class="topbar-title">CareMeds — Prescriptions</div>
+      <div class="topbar-avatar" style="background:var(--purple);font-size:11px">DR</div>
     </div>
+    <div style="background:linear-gradient(135deg,#5B21B6,#7C3AED);padding:14px 16px;color:#fff">
+      <div style="font-size:15px;font-weight:700">${drName}</div>
+      <div style="font-size:13px;opacity:.8">Select a patient to manage prescriptions</div>
+    </div>
+    <div class="sec-header"><div class="sec-title">Patients (${patients.length})</div></div>
+    ${patients.length===0?`<div class="empty-state"><div class="emoji">💊</div><p>No patients yet.<br>Add a patient from CarePath first.</p></div>`:''}
+    ${patients.map((pt,i)=>{
+      const adh = pt.adherence !== null && pt.adherence !== undefined ? pt.adherence : '—';
+      const adhNum = typeof adh === 'number' ? adh : 0;
+      const missedToday = pt.missedLogs||0;
+      const hasRealData = pt.totalLogs>0;
+      return `<div class="patient-row" onclick="selectDoctorPatient(${JSON.stringify(pt).replace(/"/g,'&quot;')})">
+        <div class="pat-avatar" style="background:${avColor(i)}">${pt.avatar||initials(pt.name)}</div>
+        <div style="flex:1">
+          <div class="pat-name">${pt.name}</div>
+          <div class="pat-sub">${pt.condition||'No conditions'} · Day ${pt.daysSince||0}</div>
+          ${hasRealData?`
+          <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+            <div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden">
+              <div style="height:100%;width:${adhNum}%;background:${adhNum>=80?'var(--success)':adhNum>=60?'var(--amber)':'var(--danger)'};border-radius:3px"></div>
+            </div>
+            <span style="font-size:12px;font-weight:700;color:${adhNum>=80?'var(--primary)':adhNum>=60?'var(--warn)':'var(--danger)'}">${adh}%</span>
+          </div>
+          ${missedToday>0?`<div style="font-size:11px;color:var(--danger);margin-top:2px">⚠️ ${missedToday} dose${missedToday>1?'s':''} missed today</div>`:'<div style="font-size:11px;color:var(--primary);margin-top:2px">✓ All doses on track</div>'}`
+          :`<div style="font-size:11px;color:var(--text3);margin-top:4px">No medication logs today</div>`}
+        </div>
+        <div style="color:var(--text3);font-size:18px">›</div>
+      </div>`;
+    }).join('')}
+    <button class="float-btn" onclick="addPatientForPractitioner()">
+      ${I.plus.replace('stroke="currentColor"','stroke="white"')} Add Patient
+    </button>
+    ${renderAddPatientModal()}
   </div>`;
 }
 
@@ -2368,124 +2890,223 @@ async function renderCareMedsPatient(){
   const timeSlots=['Morning','Afternoon','Evening','Night'];
   const timeKeys=['morning','afternoon','evening','night'];
   const timeEmoji=['🌅','☀️','🌆','🌙'];
-  // Only show relevant slots (where at least 1 med is scheduled)
-  const slots=timeKeys.filter(k=>p.medications.some(m=>m.logs[k]!=='na'));
+
+  if(!p) return `<div class="screen" style="min-height:100vh;background:var(--bg)">
+    <div class="topbar" style="background:#fff"><button class="topbar-back" onclick="nav('modules')">${I.back}</button><div class="topbar-title">My Medicines</div></div>
+    <div style="padding:32px 20px;text-align:center">
+      <div style="font-size:40px;margin-bottom:16px">💊</div>
+      <div style="font-size:18px;font-weight:700;color:var(--text);margin-bottom:8px">No medicine schedule yet</div>
+      <div style="font-size:14px;color:var(--text2);line-height:1.6;margin-bottom:24px">Your doctor will add your medicines here once your profile is set up in CareConnect.</div>
+      <button class="btn btn-primary" onclick="nav('modules')">← Back to Home</button>
+    </div>
+  </div>`;
+
+  // L2: Medicine history page
+  if(S.showMedHistoryId!==null){
+    const med = (p.medications||[]).find(m=>m.id===S.showMedHistoryId) || (p.medications||[])[S.showMedHistoryId];
+    const medName = med?.name || 'Medicine';
+    const weekData = DEMO_WEEK[S.showMedHistoryId%DEMO_WEEK.length] || DEMO_WEEK[0];
+    return `<div class="screen" style="min-height:100vh;background:var(--bg)">
+      <div class="topbar" style="background:#fff">
+        <button class="topbar-back" onclick="closeMedHistory()">${I.back}</button>
+        <div class="topbar-title">${medName}</div>
+        <span class="badge teal">Active</span>
+      </div>
+      <div style="background:#fff;padding:14px 16px;border-bottom:1px solid var(--border)">
+        <div style="font-size:13px;font-weight:700;color:var(--text)">${medName}</div>
+        <div style="font-size:12px;color:var(--text2);margin-top:2px">${med?.freq||'OD'} · ${(med?.times||[]).join(' + ')||'As prescribed'}</div>
+      </div>
+      <div style="padding:14px 16px 4px">
+        <div style="font-size:13px;font-weight:700;color:var(--text2);margin-bottom:12px">7-Day Prescription History</div>
+        <div style="overflow-x:auto">
+          <table class="med-table" style="min-width:100%">
+            <tr>
+              <th style="text-align:left">Day</th>
+              <th>🌅 Morning</th>
+              <th>☀️ Afternoon</th>
+              <th>🌙 Night</th>
+            </tr>
+            ${DEMO_WEEK[0].map((_,di)=>{
+              const dayLabel = new Date(Date.now()-(6-di)*864e5).toLocaleDateString('en-IN',{weekday:'short',day:'numeric'});
+              const st = di===6?'today':weekData[di];
+              const medTimes = med?.times?.map(t=>t.toLowerCase())||['morning'];
+              return `<tr style="${di===6?'background:var(--primary-l);font-weight:700;':'font-weight:400;'}">
+                <td style="font-size:12px;font-weight:${di===6?700:500}">${dayLabel}${di===6?' (Today)':''}</td>
+                ${['morning','afternoon','night'].map(slot=>{
+                  if(!medTimes.includes(slot)) return '<td><div class="dose-dot na">—</div></td>';
+                  const s = di===6?(S.medDoseState[med?.id+':'+slot]||((med?.logs||{})[slot])||'pending'):weekData[di];
+                  return `<td>${doseDot(s==='confirmed'?'confirmed':s==='missed'?'missed':di<6?'confirmed':'pending')}</td>`;
+                }).join('')}
+              </tr>`;
+            }).join('')}
+          </table>
+        </div>
+        <div style="display:flex;gap:14px;margin-top:14px;flex-wrap:wrap">
+          <div style="display:flex;align-items:center;gap:5px;font-size:11px"><div class="dose-dot confirmed" style="width:16px;height:16px;font-size:9px">${I.check.replace('stroke="currentColor"','stroke="var(--success)"')}</div>Taken</div>
+          <div style="display:flex;align-items:center;gap:5px;font-size:11px"><div class="dose-dot missed" style="width:16px;height:16px;font-size:9px">${I.x.replace('stroke="currentColor"','stroke="var(--danger)"')}</div>Missed</div>
+          <div style="display:flex;align-items:center;gap:5px;font-size:11px"><div class="dose-dot pending" style="width:16px;height:16px"></div>Pending</div>
+        </div>
+      </div>
+      <div style="padding:16px 16px 24px">
+        <button class="btn btn-primary" onclick="closeMedHistory()">← Back to Medicines</button>
+      </div>
+    </div>`;
+  }
+  const meds = p.medications||[];
+  const activeSlots = timeKeys.filter(k=>meds.some(m=>(m.logs||{})[k]&&(m.logs||{})[k]!=='na'));
+  const allSlots = activeSlots.length ? activeSlots : ['morning','night'];
+  const todayStr = new Date().toLocaleDateString('en-IN',{weekday:'long',day:'numeric',month:'long'});
+  const totalMeds = meds.reduce((a,m)=>a+(m.times||[]).length,0);
+  const takenCount = meds.reduce((a,m)=>a+Object.values(m.logs||{}).filter(v=>v==='confirmed').length,0) +
+    Object.entries(S.medDoseState).filter(([,v])=>v==='confirmed').length;
+  const missedCount = Object.entries(S.medDoseState).filter(([,v])=>v==='missed').length +
+    meds.reduce((a,m)=>a+Object.values(m.logs||{}).filter(v=>v==='missed').length,0);
+
   return `<div class="screen" style="min-height:100vh;background:var(--bg)">
     <div class="topbar" style="background:#fff">
       <button class="topbar-back" onclick="nav('modules')">${I.back}</button>
       <div class="topbar-title">My Medicines</div>
-      <div style="font-size:12px;color:var(--text3)">Today</div>
+      <div style="font-size:12px;color:var(--text3);font-weight:600">${new Date().toLocaleDateString('en-IN',{day:'numeric',month:'short'})}</div>
     </div>
-    <div style="padding:16px">
-      <div style="font-size:22px;font-weight:700;color:var(--text)">नमस्ते, Ramabai 🙏</div>
-      <div style="font-size:14px;color:var(--text2);margin-top:4px">Today's medicines — ${new Date().toLocaleDateString('en-IN',{weekday:'long',day:'numeric',month:'long'})}</div>
+    <!-- Daily summary -->
+    <div style="background:linear-gradient(135deg,#0B7A63,#085A49);padding:14px 16px;color:#fff">
+      <div style="font-size:15px;font-weight:700">नमस्ते, ${p.name.split(' ')[0]} 🙏</div>
+      <div style="font-size:12px;opacity:.8;margin-top:2px">${todayStr}</div>
+      <div style="display:flex;gap:10px;margin-top:10px">
+        <div style="flex:1;background:rgba(255,255,255,.15);border-radius:10px;padding:8px;text-align:center">
+          <div style="font-size:20px;font-weight:800">${takenCount}</div>
+          <div style="font-size:10px;opacity:.8">Taken</div>
+        </div>
+        <div style="flex:1;background:rgba(255,255,255,.15);border-radius:10px;padding:8px;text-align:center">
+          <div style="font-size:20px;font-weight:800">${missedCount}</div>
+          <div style="font-size:10px;opacity:.8">Missed</div>
+        </div>
+        <div style="flex:1;background:rgba(255,255,255,.15);border-radius:10px;padding:8px;text-align:center">
+          <div style="font-size:20px;font-weight:800">${Math.max(0,totalMeds-takenCount-missedCount)}</div>
+          <div style="font-size:10px;opacity:.8">Pending</div>
+        </div>
+      </div>
     </div>
-    ${slots.map(slot=>{
-      const meds=p.medications.filter(m=>m.logs[slot]!=='na');
-      const idx=timeKeys.indexOf(slot);
-      const allDone=meds.every(m=>{
-        const key=`${m.id}:${slot}`;
-        return S.medDoseState[key]==='confirmed'||m.logs[slot]==='confirmed';
-      });
-      return `<div style="padding:0 16px 4px">
-        <div style="font-size:13px;font-weight:700;color:var(--text3);margin-bottom:8px;font-family:'Outfit',sans-serif">${timeEmoji[idx]} ${timeSlots[idx]}</div>
-        ${meds.map(m=>{
-          const key=`${m.id}:${slot}`;
-          const ds=S.medDoseState[key]||m.logs[slot]||'pending';
-          return `<div class="today-pill">
-            <div class="pill-header">
-              <div class="pill-icon" style="background:${m.bg}"><span style="font-size:20px">💊</span></div>
+    ${missedCount>0?`<div class="alert-banner red" style="margin:10px 16px 0">
+      ${I.alert.replace('stroke="currentColor"','stroke="var(--danger)"')}
+      <div><strong>${missedCount} dose${missedCount>1?'s':''} missed.</strong> Your doctor and family have been notified.</div>
+    </div>`:''}
+    <!-- Per-slot sections -->
+    ${allSlots.map(slot=>{
+      const idx = timeKeys.indexOf(slot);
+      const slotMeds = meds.filter(m=>(m.logs||{})[slot]&&(m.logs||{})[slot]!=='na');
+      if(!slotMeds.length) return '';
+      return `<div style="padding:14px 16px 4px">
+        <div style="font-size:14px;font-weight:700;color:var(--text);margin-bottom:10px;font-family:'Outfit',sans-serif">${timeEmoji[idx]} ${timeSlots[idx]}</div>
+        ${slotMeds.map((m,mi)=>{
+          const key = m.id+':'+slot;
+          const ds = S.medDoseState[key]||(m.logs||{})[slot]||'pending';
+          const noteKey = key+':note';
+          const savedNote = S.medNotes[noteKey]||'';
+          const bgColors=['#E8F5F2','#EFF6FF','#EDE9FE','#FEE2E2'];
+          return `<div class="today-pill" style="margin-bottom:10px">
+            <div class="pill-header" style="cursor:pointer" onclick="showMedHistory(${mi})">
+              <div class="pill-icon" style="background:${bgColors[mi%4]}"><span style="font-size:20px">💊</span></div>
               <div style="flex:1">
-                <div style="font-size:16px;font-weight:700;color:var(--text)">${m.name}</div>
-                <div style="font-size:13px;color:var(--text2)">${m.generic} · 1 tablet</div>
+                <div style="font-size:15px;font-weight:700;color:var(--text)">${m.name}</div>
+                <div style="font-size:12px;color:var(--text2)">${m.generic||m.name} · Tap for history</div>
               </div>
-              <span class="badge ${ds==='confirmed'?'green':ds==='missed'?'red':'amber'}">
-                ${ds==='confirmed'?'✓ Taken':ds==='missed'?'✗ Missed':'Pending'}
+              <span class="badge ${ds==='confirmed'?'green':ds==='missed'?'red':'amber'}" style="flex-shrink:0">
+                ${ds==='confirmed'?'✓ Taken':ds==='missed'?'✗ Missed':'● Pending'}
               </span>
             </div>
-            <div class="pill-body">
+            <div class="pill-body" style="padding-top:0">
               ${ds==='pending'?`
-                <button class="confirm-btn take" onclick="confirmDose(${m.id},'${slot}')">
-                  ${I.check.replace('stroke="currentColor"','stroke="var(--success)"')} I have taken this medicine
+                <button class="confirm-btn take" onclick="confirmDose('${m.id}','${slot}')">
+                  ${I.check.replace('stroke="currentColor"','stroke="var(--success)"')} Mark as Taken
                 </button>
-                <button class="confirm-btn missed" style="margin-top:6px" onclick="markMissed(${m.id},'${slot}')">
-                  ${I.x.replace('stroke="currentColor"','stroke="var(--danger)"')} I could not take it
-                </button>
-              `:''}
+                <button class="confirm-btn missed" style="margin-top:6px;background:var(--danger-l);color:var(--danger);border:1.5px solid #FCA5A5" onclick="markMissed('${m.id}','${slot}')">
+                  ${I.x.replace('stroke="currentColor"','stroke="var(--danger)"')} Could Not Take It
+                </button>`:''}
               ${ds==='confirmed'?`
-                <div style="display:flex;align-items:center;gap:8px;padding:8px;background:var(--success-l);border-radius:var(--r-sm);color:#166534;font-size:13px;font-weight:600">
-                  ${I.check.replace('stroke="currentColor"','stroke="#166534"')} Confirmed at 8:32 AM — Great job! 🎉
+                <div style="display:flex;align-items:center;gap:8px;padding:10px;background:var(--success-l);border-radius:var(--r-sm);color:#166534;font-size:13px;font-weight:600">
+                  ${I.check.replace('stroke="currentColor"','stroke="#166534"')} Marked as taken ✅ — Visible to doctor &amp; family
                 </div>
-                <button class="btn btn-outline" style="width:100%;margin-top:8px;font-size:12px;padding:8px;color:var(--primary)" onclick="editMedicineStatus(${m.id},'${slot}')">
-                  Edit
-                </button>
-              `:''}
+                <textarea class="form-input" style="margin-top:8px;font-size:13px;resize:none" rows="2"
+                  placeholder="Add a note (e.g. taken with food, felt dizzy after)..."
+                  oninput="S.medNotes['${noteKey}']=this.value">${savedNote}</textarea>
+                <button class="btn btn-outline" style="width:100%;margin-top:6px;font-size:12px;padding:8px" onclick="editMedicineStatus('${m.id}','${slot}')">↩ Change Status</button>`:''}
               ${ds==='missed'?`
-                <div style="display:flex;align-items:center;gap:8px;padding:8px;background:var(--danger-l);border-radius:var(--r-sm);color:var(--danger);font-size:13px;font-weight:600">
-                  ${I.alert.replace('stroke="currentColor"','stroke="var(--danger)"')} Missed — Vikram has been notified
+                <div style="display:flex;align-items:center;gap:8px;padding:10px;background:var(--danger-l);border-radius:var(--r-sm);color:var(--danger);font-size:13px;font-weight:600">
+                  ${I.alert.replace('stroke="currentColor"','stroke="var(--danger)"')} Marked as missed — Doctor &amp; family notified
                 </div>
-                <button class="btn btn-outline" style="width:100%;margin-top:8px;font-size:12px;padding:8px;color:var(--primary)" onclick="editMedicineStatus(${m.id},'${slot}')">
-                  Edit
-                </button>
-              `:''}
+                <textarea class="form-input" style="margin-top:8px;font-size:13px;resize:none" rows="2"
+                  placeholder="Tell us why (e.g. forgot, felt sick, no supply)..."
+                  oninput="S.medNotes['${noteKey}']=this.value">${savedNote}</textarea>
+                <button class="btn btn-outline" style="width:100%;margin-top:6px;font-size:12px;padding:8px" onclick="editMedicineStatus('${m.id}','${slot}')">↩ Change Status</button>`:''}
             </div>
           </div>`;
         }).join('')}
       </div>`;
     }).join('')}
-    <!-- NEXT REMINDER -->
-    ${S.reminderTimes && S.reminderTimes.length > 0 ? `
-    <div style="padding:0 16px">
-      <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:12px">Scheduled Reminders (${S.reminderTimes.length})</div>
-      ${S.reminderTimes.map((time, idx) => `
-      <div class="card" style="background:linear-gradient(135deg,var(--primary-l),#fff);border-color:var(--primary-100);margin-bottom:8px">
-        <div style="display:flex;align-items:center;gap:12px">
-          ${I.bell.replace('stroke="currentColor"','stroke="var(--primary)"')}
-          <div style="flex:1">
-            <div style="font-size:13px;font-weight:700;color:var(--text)">Reminder ${idx + 1}</div>
-            <div style="font-size:15px;font-weight:700;color:var(--primary);margin-top:1px">${time}</div>
-            <div style="font-size:12px;color:var(--text2)">App notification</div>
-          </div>
-          <button class="btn btn-sm" style="background:var(--danger-l);color:var(--danger);border:none;padding:8px 12px" onclick="editReminders()">Edit</button>
-        </div>
-      </div>
-      `).join('')}
-    </div>
-    ` : `
-    <div class="card" style="background:linear-gradient(135deg,#E8F5F2,#fff);border-color:#D1E6E3;padding:20px">
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
-        ${I.bell.replace('stroke="currentColor"','stroke="var(--primary)"')}
-        <div>
-          <div style="font-size:15px;font-weight:700;color:var(--text)">No Reminders Set</div>
-          <div style="font-size:13px;color:var(--text2);margin-top:2px">Add medication reminders in your profile</div>
-        </div>
-      </div>
-      <button class="btn" style="width:100%;background:var(--primary);color:#fff;border:none;display:flex;align-items:center;justify-content:center;gap:8px" onclick="editReminders()">
-        ${I.plus} Set Reminder
+    <!-- Reminders -->
+    <div style="padding:0 16px 24px;margin-top:8px">
+      ${S.reminderTimes&&S.reminderTimes.length>0?`
+        <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:10px">Reminders (${S.reminderTimes.length})</div>
+        ${S.reminderTimes.map((time,idx)=>`
+          <div class="card" style="background:var(--primary-l);border-color:var(--primary-100);margin-bottom:8px;padding:12px 16px">
+            <div style="display:flex;align-items:center;gap:10px">
+              ${I.bell.replace('stroke="currentColor"','stroke="var(--primary)"')}
+              <div style="flex:1"><div style="font-size:14px;font-weight:700;color:var(--primary)">${time}</div><div style="font-size:11px;color:var(--text2)">App notification</div></div>
+              <button class="btn btn-sm" style="background:transparent;color:var(--primary);border:1px solid var(--primary);padding:6px 10px" onclick="editReminders()">Edit</button>
+            </div>
+          </div>`).join('')}`:`
+        <div class="card" style="padding:18px;text-align:center">
+          <div style="font-size:24px;margin-bottom:8px">🔔</div>
+          <div style="font-size:14px;font-weight:700;color:var(--text);margin-bottom:4px">No Reminders Set</div>
+          <div style="font-size:12px;color:var(--text2);margin-bottom:12px">Get notified at the right time to take your medicines</div>
+          <button class="btn btn-outline btn-sm" style="width:100%" onclick="editReminders()">${I.plus.replace('stroke="currentColor"','stroke="var(--primary)"')} Set Reminder</button>
+        </div>`}
+      <button class="btn btn-ghost" style="margin-top:12px" onclick="callDoctor()">
+        ${I.phone.replace('stroke="currentColor"','stroke="var(--text2)"')} Call My Doctor
       </button>
-    </div>
-    `}
-    <div style="padding:0 16px 24px">
-      <button class="btn btn-ghost" onclick="callDoctor()">
-        ${I.phone.replace('stroke="currentColor"','stroke="var(--text2)"')} ${t('call_my_doctor')}
-      </button>
-      <div style="font-size:12px;color:var(--text3);margin-top:8px">${(PATIENT_DATA?.doctor?.phone||'')}</div>
     </div>
   </div>`;
 }
 
-function confirmDose(id, slot){
-  S.medDoseState[`${id}:${slot}`]='confirmed';
-  render();
+async function saveMedLog(id, slot, status){
+  if(!currentPatientId) return;
+  const today = new Date().toISOString().split('T')[0];
+
+  // Delete any existing log for this patient/medication/date/slot
+  await sb.from('medication_logs')
+    .delete()
+    .eq('patient_id', currentPatientId)
+    .eq('medication_id', id)
+    .eq('log_date', today)
+    .eq('scheduled_time', slot)
+    .catch(()=>{});
+
+  // Insert with self-healing: unknown columns are auto-dropped on first failure and retried
+  await safeInsert('medication_logs', {
+    patient_id: currentPatientId,
+    medication_id: id,
+    log_date: today,
+    scheduled_time: slot,
+    dose_time: slot,
+    status,
+    taken_at: new Date().toISOString(),
+  });
 }
 
-function markMissed(id, slot){
+async function confirmDose(id, slot){
+  S.medDoseState[`${id}:${slot}`]='confirmed';
+  render();
+  await saveMedLog(id, slot, 'confirmed');
+}
+
+async function markMissed(id, slot){
   S.medDoseState[`${id}:${slot}`]='missed';
   render();
+  await saveMedLog(id, slot, 'missed');
 }
 
 function editMedicineStatus(id, slot){
-  // Reset to pending to allow re-selection
   delete S.medDoseState[`${id}:${slot}`];
   render();
 }
@@ -2506,6 +3127,7 @@ async function render(){
     case 'modules': html=renderModules(); break;
     case 'carepath': html=renderCarePath(); break;
     case 'caremeds': html=renderCareMeds(); break;
+    case 'careguide': initTriage(); html=renderCareGuide(); break;
     case 'profile': html=renderProfileEditor(); break;
     default: html=renderLogin();
   }
@@ -2527,8 +3149,6 @@ async function render(){
 }
 
 async function handleLogout() {
-  S.userType = null;
-  S.userTypeHint = null;
   await sb.auth.signOut();
   currentUser = null;
   currentPatientId = null;
@@ -2537,9 +3157,24 @@ async function handleLogout() {
   currentMedicationLogs = [];
   currentCheckins = [];
   availableRoles = [];
+  PATIENT_DATA = null;
+  PATIENT_LIST = null;
+  PRACTITIONER_DATA = null;
+  FAMILY_DATA = null;
+  S.userType = null;
+  S.userTypeHint = null;
   S.role = null;
   S.email = '';
   S.navHistory = [];
+  S.showAddPatientModal = false;
+  S.noProfileNudge = false;
+  S.cgMessages = [];
+  S.triageState = 'idle';
+  S.medDoseState = {};
+  S.reminderTimes = [];
+  S.checkinFeel = 0;
+  S.checkinPain = 3;
+  S.checkinSymptoms = [];
   nav('login', null, false);
 }
 
